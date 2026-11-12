@@ -1,0 +1,49 @@
+{
+  "token_symbol": "RIZE",
+  "chains": {
+    "base": {
+      "chain_id": 8453,
+      "name": "Base",
+      "drpc_slug": "base",
+      "token": "0x9818B6c09f5ECc843060927E8587c427C7C93583",
+      "start_block": null,
+      "reorg_margin": 300,
+      "initial_chunk": 20000,
+      "min_chunk": 100,
+      "max_chunk": 200000
+    },
+    "ethereum": {
+      "chain_id": 1,
+      "name": "Ethereum",
+      "drpc_slug": "ethereum",
+      "token": "0x9F1E8F87c6321b84baD7DDa7DfB86D5115A47605",
+      "start_block": null,
+      "reorg_margin": 64,
+      "initial_chunk": 20000,
+      "min_chunk": 100,
+      "max_chunk": 200000
+    },
+    "bsc": {
+      "chain_id": 56,
+      "name": "BNB Chain",
+      "drpc_slug": "bsc",
+      "token": "0xaedaff046601beb063b647845dfb21841f32d6a4",
+      "start_block": null,
+      "reorg_margin": 600,
+      "initial_chunk": 20000,
+      "min_chunk": 100,
+      "max_chunk": 200000
+    },
+    "polygon": {
+      "chain_id": 137,
+      "name": "Polygon",
+      "drpc_slug": "polygon",
+      "token": "0x9F1E8F87c6321b84baD7DDa7DfB86D5115A47605",
+      "start_block": null,
+      "reorg_margin": 300,
+      "initial_chunk": 20000,
+      "min_chunk": 100,
+      "max_chunk": 200000
+    }
+  }
+}
