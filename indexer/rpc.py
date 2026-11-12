@@ -25,6 +25,10 @@ class RangeTooLarge(RpcError):
 SERVER_ERROR_SPLIT_MIN_WIDTH = 100
 
 _RATE_HINTS = ("rate limit", "rate-limit", "too many requests", "throttl", "compute units per second")
+# A load-balanced node sometimes answers from a pruned (non-archive) upstream.
+# Asking again usually reaches an archive node, so these errors are retried.
+_RETRY_HINTS = ("pruned", "earliest available", "missing trie node", "no available upstreams",
+                "state is not available", "history unavailable")
 _RANGE_HINTS = (
     "range", "too many", "exceed", "limit", "more than", "10000", "10,000",
     "timeout", "timed out", "response size", "query returned", "too large",
@@ -35,6 +39,8 @@ def _classify(message: str, code: int | None) -> str:
     m = (message or "").lower()
     if code == 429 or any(h in m for h in _RATE_HINTS):
         return "rate"
+    if any(h in m for h in _RETRY_HINTS):
+        return "retry"
     if any(h in m for h in _RANGE_HINTS):
         return "range"
     return "other"
@@ -115,7 +121,7 @@ class RpcClient:
             except RangeTooLarge:
                 raise
             except RpcError as e:
-                if _classify(str(e), e.code) == "rate" and attempt < self.max_retries:
+                if _classify(str(e), e.code) in ("rate", "retry") and attempt < self.max_retries:
                     attempt += 1
                     time.sleep(min(30.0, (2 ** attempt) * 0.25) + random.random() * 0.25)
                     continue
