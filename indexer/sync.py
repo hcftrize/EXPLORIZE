@@ -67,6 +67,8 @@ def sync_chain(chain: Chain, client, conn, *, max_seconds: float | None = None,
             f"margin {chain.reorg_margin}) to {target:,}")
 
     chunk = chain.initial_chunk
+    ceiling = chain.max_chunk   # largest chunk size believed to work on this node
+    ok_streak = 0
     total_rows = 0
     stopped_early = False
     topics = [TRANSFER_TOPIC0]
@@ -96,9 +98,15 @@ def sync_chain(chain: Chain, client, conn, *, max_seconds: float | None = None,
             f"{(target - hi):,} blocks left)")
         cursor = hi + 1
         if stats["splits"] == 0:
-            chunk = min(chunk * 2, chain.max_chunk)
+            ok_streak += 1
+            if ok_streak >= 100:  # from time to time, test whether the node accepts more again
+                ceiling = min(ceiling * 2, chain.max_chunk)
+                ok_streak = 0
+            chunk = min(chunk * 2, ceiling)
         else:
-            chunk = max(chunk // 2, chain.min_chunk)
+            ok_streak = 0
+            ceiling = max(chunk // 2, chain.min_chunk)  # do not retry the size that just failed
+            chunk = ceiling
 
     return {"chain": chain.key, "skipped": False, "rows": total_rows,
             "stopped_early": stopped_early, "head": head,
