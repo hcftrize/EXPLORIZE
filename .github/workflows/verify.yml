@@ -4,10 +4,14 @@ name: Explorize verify
 #  1. supply rebuilt from our transfers == totalSupply() on-chain
 #  2. balances rebuilt from our transfers == balanceOf() on-chain, for the largest
 #     holders plus a random sample (or every address if "full_balance_check" is ticked)
+# Both checks always run, even if the first one fails, so you see everything at once.
 # Do not run it while a sync is running.
 on:
   workflow_dispatch:
     inputs:
+      chain:
+        description: "all, base, ethereum, bsc or polygon"
+        default: all
       full_balance_check:
         description: "Check EVERY address (slower, costs more RPC calls)"
         type: boolean
@@ -20,6 +24,7 @@ jobs:
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      CHAIN: ${{ inputs.chain }}
       FULL: ${{ inputs.full_balance_check }}
     steps:
       - uses: actions/checkout@v4
@@ -29,14 +34,22 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Supply check
-        run: python -m indexer verify --chain all
+        id: supply
+        continue-on-error: true
+        run: python -m indexer verify --chain "${CHAIN:-all}"
       - name: Balance check
+        id: balances
+        continue-on-error: true
         run: |
           if [ "$FULL" = "true" ]; then
-            python -m indexer verify-balances --chain all --all
+            python -m indexer verify-balances --chain "${CHAIN:-all}" --all
           else
-            python -m indexer verify-balances --chain all --top 200 --sample 300
+            python -m indexer verify-balances --chain "${CHAIN:-all}" --top 200 --sample 300
           fi
       - name: Status
-        if: always()
-        run: python -m indexer status --chain all
+        run: python -m indexer status --chain "${CHAIN:-all}"
+      - name: Fail the run if a check failed
+        if: ${{ steps.supply.outcome == 'failure' || steps.balances.outcome == 'failure' }}
+        run: |
+          echo "At least one integrity check failed: see the steps above."
+          exit 1
