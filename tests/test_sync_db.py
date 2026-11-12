@@ -113,3 +113,14 @@ def test_find_start_block_wrong_address():
     c = FakeClient([], 1000, deploy_block=5000)  # no code at head
     with pytest.raises(SystemExit):
         find_start_block(c, CHAIN, 1000, log=lambda *_: None)
+
+
+def test_chunk_size_does_not_oscillate_when_node_has_a_ceiling(conn):
+    big = Chain(key="testchain", chain_id=999, name="Test", drpc_slug="x",
+                token="0x" + "11" * 20, start_block=None, reorg_margin=20,
+                initial_chunk=20000, min_chunk=10, max_chunk=200000)
+    logs = [make_log(b, 0, 0xA1, 0xB2, 1) for b in range(10, 2_000_000, 5000)]
+    c = FakeClient(logs, 2_000_000, max_range=5000, deploy_block=10)
+    sync_chain(big, c, conn, log=lambda *_: None)
+    assert count(conn) == len(logs)
+    assert c.get_logs_calls < 450  # without a learned ceiling it needs ~530
