@@ -107,3 +107,27 @@ def test_batch_returns_results_in_order(monkeypatch):
             {"jsonrpc": "2.0", "id": 0, "result": {"timestamp": "0x10"}}]  # out of order on purpose
     c = _client_with([_Resp(200, body)], monkeypatch)
     assert c.get_block_timestamps([5, 6]) == {5: 16, 6: 32}
+
+
+def test_http500_on_wide_range_is_split_but_narrow_range_fails_fast(monkeypatch):
+    c = _client_with([_Resp(500, None)] * 3, monkeypatch)
+    with pytest.raises(RangeTooLarge):          # 10,000 blocks: ask to split
+        c.get_logs("0x1", [], 1, 10_000)
+    c = _client_with([_Resp(500, None)] * 3, monkeypatch)
+    with pytest.raises(RpcError) as e:          # 50 blocks: real outage, no split
+        c.get_logs("0x1", [], 1, 50)
+    assert not isinstance(e.value, RangeTooLarge)
+
+
+def test_outage_aborts_quickly_instead_of_splitting_forever():
+    class Down(FakeClient):
+        def get_logs(self, address, topics, lo, hi):
+            self.get_logs_calls += 1
+            if hi - lo + 1 > 100:
+                raise RangeTooLarge("500")
+            raise RpcError("giving up", exhausted=True)
+
+    c = Down([], 1_000_000)
+    with pytest.raises(RpcError):
+        fetch_logs_adaptive(c, "0xtoken", [TRANSFER_TOPIC0], 1, 200_000, 10_000, {})
+    assert c.get_logs_calls < 30
