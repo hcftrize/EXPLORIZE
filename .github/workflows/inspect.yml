@@ -1,0 +1,40 @@
+name: Explorize inspect
+
+# Diagnostic: reads the same blocks with several window widths and compares with the
+# database. Used to find out why a balance does not match.
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "base, ethereum, bsc or polygon"
+        default: bsc
+      from_block:
+        description: "First block to inspect"
+        required: true
+      to_block:
+        description: "Last block (leave empty for a single block)"
+        default: ""
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      CHAIN: ${{ inputs.chain }}
+      FROM_BLOCK: ${{ inputs.from_block }}
+      TO_BLOCK: ${{ inputs.to_block }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          if [ -n "$TO_BLOCK" ]; then
+            python -m indexer inspect --chain "$CHAIN" --from-block "$FROM_BLOCK" --to-block "$TO_BLOCK"
+          else
+            python -m indexer inspect --chain "$CHAIN" --from-block "$FROM_BLOCK"
+          fi
