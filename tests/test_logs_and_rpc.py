@@ -131,3 +131,11 @@ def test_outage_aborts_quickly_instead_of_splitting_forever():
     with pytest.raises(RpcError):
         fetch_logs_adaptive(c, "0xtoken", [TRANSFER_TOPIC0], 1, 200_000, 10_000, {})
     assert c.get_logs_calls < 30
+
+
+def test_pruned_history_answer_is_retried_until_an_archive_node_answers(monkeypatch):
+    pruned = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000,
+              "message": "pruned history unavailable: requested 34590770, earliest available 56500000"}}
+    ok = {"jsonrpc": "2.0", "id": 1, "result": []}
+    c = _client_with([_Resp(200, pruned), _Resp(200, pruned), _Resp(200, ok)], monkeypatch)
+    assert c.get_logs("0x1", [], 34_590_770, 34_615_769) == []
