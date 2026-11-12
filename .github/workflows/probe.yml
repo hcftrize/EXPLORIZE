@@ -1,0 +1,32 @@
+name: Explorize probe
+
+# Checks the dRPC key, the 4 RIZE contracts, the real eth_getLogs limits and the
+# database. Safe to run any time. Tick "init_db" the first time to create tables.
+on:
+  workflow_dispatch:
+    inputs:
+      init_db:
+        description: "Create or update the database tables first"
+        type: boolean
+        default: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      INIT_DB: ${{ inputs.init_db }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Create / update tables
+        if: ${{ inputs.init_db }}
+        run: python -m indexer init-db
+      - name: Probe chains and database
+        run: python -m indexer probe

@@ -1,0 +1,32 @@
+name: Explorize backfill
+
+# One-off: reads the full history of every chain from the token deployment block.
+# Needs an archive node (dRPC Pay As You Go) to find the deployment blocks.
+# Progress is saved after every chunk: if it stops, just run it again.
+on:
+  workflow_dispatch:
+    inputs:
+      max_minutes:
+        description: "Stop cleanly after this many minutes (job limit is 6 hours)"
+        default: "330"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        chain: [base, ethereum, bsc, polygon]
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      MAX_MINUTES: ${{ inputs.max_minutes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m indexer sync --chain "${{ matrix.chain }}" --max-minutes "${MAX_MINUTES:-330}"

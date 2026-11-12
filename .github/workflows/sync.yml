@@ -1,0 +1,31 @@
+name: Explorize sync
+
+# Incremental sync (also usable for the very first sync). Meant to be triggered
+# hourly by cron-job.org through the GitHub API (workflow_dispatch).
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "all, base, ethereum, bsc or polygon"
+        default: all
+      max_minutes:
+        description: "Stop cleanly after this many minutes"
+        default: "20"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      CHAIN: ${{ inputs.chain }}
+      MAX_MINUTES: ${{ inputs.max_minutes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m indexer sync --chain "${CHAIN:-all}" --max-minutes "${MAX_MINUTES:-20}"
