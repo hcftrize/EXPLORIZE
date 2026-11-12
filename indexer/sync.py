@@ -14,6 +14,7 @@ import time
 from . import db
 from .config import Chain, env_int
 from .logs import TRANSFER_TOPIC0, decode_transfer, fetch_logs_adaptive
+from .rpc import RpcError
 
 
 def find_start_block(client, chain: Chain, head: int, log=print) -> int:
@@ -39,6 +40,20 @@ def find_start_block(client, chain: Chain, head: int, log=print) -> int:
             "Or set start_block manually in config/chains.json.")
     log(f"[{chain.key}] deployment block found: {hi}")
     return hi
+
+
+def _fetch_with_retry(client, chain: Chain, topics, lo, hi, log_cap, stats, log, attempts: int = 4):
+    """A long backfill must not die on one hiccup of the node: retry the chunk."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch_logs_adaptive(client, chain.token, topics, lo, hi, log_cap, stats)
+        except RpcError as e:
+            if attempt == attempts:
+                raise
+            wait = 15 * attempt
+            log(f"[{chain.key}] RPC error on blocks {lo:,}-{hi:,} ({e}); "
+                f"retry {attempt}/{attempts - 1} in {wait}s")
+            time.sleep(wait)
 
 
 def sync_chain(chain: Chain, client, conn, *, max_seconds: float | None = None,
@@ -80,7 +95,7 @@ def sync_chain(chain: Chain, client, conn, *, max_seconds: float | None = None,
             break
         hi = min(cursor + chunk - 1, target)
         stats = {"splits": 0}
-        raw = fetch_logs_adaptive(client, chain.token, topics, cursor, hi, log_cap, stats)
+        raw = _fetch_with_retry(client, chain, topics, cursor, hi, log_cap, stats, log)
         decoded = [d for d in (decode_transfer(l) for l in raw) if d]
 
         missing = {d["block_number"] for d in decoded if d["block_ts"] is None}
