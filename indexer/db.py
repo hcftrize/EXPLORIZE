@@ -115,3 +115,23 @@ def chain_stats(conn, chain_id: int) -> dict:
         n, tmin, tmax = cur.fetchone()
     conn.commit()
     return {"rows": n, "first": tmin, "last": tmax}
+
+
+def balances_up_to(conn, chain_id: int, up_to_block: int) -> dict[bytes, int]:
+    """Balance of every address touched by a transfer, rebuilt from our rows
+    (received minus sent, up to up_to_block). The zero address is excluded."""
+    zero = bytes(20)
+    with conn.cursor() as cur:
+        cur.execute(
+            """WITH d AS (
+                 SELECT to_addr AS a, amount AS v FROM transfers
+                   WHERE chain_id = %s AND block_number <= %s
+                 UNION ALL
+                 SELECT from_addr, -amount FROM transfers
+                   WHERE chain_id = %s AND block_number <= %s
+               )
+               SELECT a, SUM(v) FROM d GROUP BY a""",
+            (chain_id, up_to_block, chain_id, up_to_block))
+        out = {bytes(a): int(v) for a, v in cur.fetchall() if bytes(a) != zero}
+    conn.commit()
+    return out
