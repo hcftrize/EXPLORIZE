@@ -8,7 +8,7 @@ import time
 
 from . import db
 from .config import Chain
-from .logs import TRANSFER_TOPIC0, ZERO_ADDRESS  # noqa: F401  (ZERO_ADDRESS re-exported)
+from .logs import TRANSFER_TOPIC0, ZERO_ADDRESS, decode_transfer  # noqa: F401
 from .rpc import RangeTooLarge, RpcError
 
 
@@ -159,3 +159,48 @@ def verify_balances(chain: Chain, client, conn, *, top: int = 200, sample: int =
         return False
     log(f"[{chain.key}] balances OK: {len(chosen):,} addresses match on-chain at block {block:,}")
     return True
+
+
+def inspect_range(chain: Chain, client, conn, lo: int, hi: int, log=print) -> bool:
+    """Diagnostic: read the same blocks with windows of different widths, and compare
+    with what we stored. Shows exactly which events the node returns, in which
+    window, and which ones our database lacks (or has in excess)."""
+    def read(a: int, b: int) -> list[dict]:
+        raw = client.get_logs(chain.token, [TRANSFER_TOPIC0], a, b)
+        return [d for d in (decode_transfer(l) for l in raw) if d]
+
+    def key(d: dict) -> tuple:
+        return (d["tx_hash"], d["log_index"])
+
+    log(f"[{chain.key}] inspecting blocks {lo:,}-{hi:,}")
+    seen: dict[int, dict] = {}
+    events: dict[tuple, dict] = {}
+    for ctx in (0, 1_000, 100_000):
+        try:
+            ds = read(max(lo - ctx, 0), hi + ctx)
+        except RpcError as e:
+            log(f"  window +/-{ctx:>7,}: refused ({e})")
+            continue
+        inside = {key(d): d for d in ds if lo <= d["block_number"] <= hi}
+        seen[ctx] = inside
+        events.update(inside)
+        log(f"  window +/-{ctx:>7,}: {len(ds):>6,} events in the window, {len(inside)} inside the target blocks")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT tx_hash, log_index FROM transfers WHERE chain_id = %s AND block_number BETWEEN %s AND %s",
+                    (chain.chain_id, lo, hi))
+        in_db = {(bytes(t), i) for t, i in cur.fetchall()}
+    conn.commit()
+
+    consistent = all(set(v) == set(events) for v in seen.values())
+    missing = set(events) - in_db
+    extra = in_db - set(events)
+    log(f"  node answers identical for every window width: {'yes' if consistent else 'NO (the node is inconsistent)'}")
+    log(f"  events seen by the node: {len(events)}; in our database: {len(in_db)}; "
+        f"missing from our database: {len(missing)}; in our database but not seen now: {len(extra)}")
+    for k, d in sorted(events.items(), key=lambda kv: (kv[1]["block_number"], kv[1]["log_index"]))[:60]:
+        widths = ",".join(str(c) for c, v in seen.items() if k in v) or "-"
+        log(f"    block {d['block_number']:,} idx {d['log_index']:>5}  0x{d['from'].hex()[:8]}.. -> 0x{d['to'].hex()[:8]}.."
+            f"  {d['amount'] / 10 ** 18:>16,.6f}  ts={d['block_ts']}  "
+            f"{'IN-DB' if k in in_db else 'MISSING-FROM-DB'}  seen in windows: {widths}")
+    return consistent and not missing and not extra
