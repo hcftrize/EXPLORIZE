@@ -11,6 +11,10 @@ from .config import SCHEMA_FILE, Chain
 LOCK_NAMESPACE = 7_300_000  # advisory lock key = namespace + chain_id
 
 
+class DataError(Exception):
+    """The node returned data we cannot store without losing information."""
+
+
 def connect(url: str):
     conn = psycopg2.connect(url, connect_timeout=20, application_name="explorize-indexer")
     conn.autocommit = False
@@ -76,7 +80,15 @@ def replace_range(conn, chain_id: int, lo: int, hi: int, rows: list[tuple], last
     fresh ones, move the checkpoint. Re-running the same range is harmless."""
     dedup: dict[tuple, tuple] = {}
     for r in rows:  # r = (chain_id, block, ts, tx_hash, log_index, from, to, amount)
-        dedup[(r[0], r[3], r[4])] = r
+        key = (r[0], r[3], r[4])
+        prev = dedup.get(key)
+        if prev is not None and prev != r:
+            # Two DIFFERENT events with the same (tx, logIndex): the node gave a wrong logIndex.
+            # Keeping one would silently lose the other, so refuse loudly.
+            raise DataError(
+                f"chain {r[0]}: two different transfers share tx 0x{r[3].hex()} log_index {r[4]} "
+                f"(blocks {prev[1]} and {r[1]}); the node returned inconsistent log indexes")
+        dedup[key] = r
     payload = [
         (r[0], r[1], r[2], psycopg2.Binary(r[3]), r[4], psycopg2.Binary(r[5]), psycopg2.Binary(r[6]), r[7])
         for r in dedup.values()
