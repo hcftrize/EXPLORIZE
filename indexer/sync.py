@@ -42,6 +42,13 @@ def find_start_block(client, chain: Chain, head: int, log=print) -> int:
     return hi
 
 
+MIN_VALID_TS = 1_400_000_000  # anything before 2014 is a node placeholder (some answer 0x0)
+
+
+def _valid_ts(ts) -> bool:
+    return ts is not None and ts >= MIN_VALID_TS
+
+
 def _fetch_with_retry(client, chain: Chain, topics, lo, hi, log_cap, stats, log, attempts: int = 4):
     """A long backfill must not die on one hiccup of the node: retry the chunk."""
     for attempt in range(1, attempts + 1):
@@ -98,11 +105,11 @@ def sync_chain(chain: Chain, client, conn, *, max_seconds: float | None = None,
         raw = _fetch_with_retry(client, chain, topics, cursor, hi, log_cap, stats, log)
         decoded = [d for d in (decode_transfer(l) for l in raw) if d]
 
-        missing = {d["block_number"] for d in decoded if d["block_ts"] is None}
+        missing = {d["block_number"] for d in decoded if not _valid_ts(d["block_ts"])}
         ts_map = client.get_block_timestamps(missing) if missing else {}
         rows = [
             (chain.chain_id, d["block_number"],
-             d["block_ts"] if d["block_ts"] is not None else ts_map[d["block_number"]],
+             d["block_ts"] if _valid_ts(d["block_ts"]) else ts_map[d["block_number"]],
              d["tx_hash"], d["log_index"], d["from"], d["to"], d["amount"])
             for d in decoded
         ]
