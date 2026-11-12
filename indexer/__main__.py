@@ -9,7 +9,7 @@ import time
 import psycopg2
 
 from . import config, db
-from .checks import probe_chain, probe_db, status_chain, verify_chain
+from .checks import probe_chain, probe_db, status_chain, verify_balances, verify_chain
 from .rpc import RpcClient, RpcError
 from .sync import find_start_block, sync_chain
 
@@ -28,10 +28,13 @@ def log(msg: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
-    p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "status"])
+    p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "status"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
+    p.add_argument("--top", type=int, default=200, help="verify-balances: largest holders to check")
+    p.add_argument("--sample", type=int, default=300, help="verify-balances: random other addresses")
+    p.add_argument("--all", action="store_true", help="verify-balances: check every address (slow)")
     args = p.parse_args(argv)
     chains = config.select_chains(args.chain)
     ok = True
@@ -65,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"[{c.key}] done: {res}")
             elif args.command == "verify":
                 ok &= verify_chain(c, client, conn, log)
+            elif args.command == "verify-balances":
+                ok &= verify_balances(c, client, conn, top=args.top, sample=args.sample,
+                                      check_all=args.all, log=log)
             elif args.command == "status":
                 status_chain(c, client, conn, log)
         except (RpcError, SystemExit, psycopg2.Error) as e:
