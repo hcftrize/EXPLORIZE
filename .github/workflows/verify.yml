@@ -1,16 +1,26 @@
 name: Explorize verify
 
-# Integrity check: supply rebuilt from our transfers must equal totalSupply() on-chain.
+# Integrity checks, per chain:
+#  1. supply rebuilt from our transfers == totalSupply() on-chain
+#  2. balances rebuilt from our transfers == balanceOf() on-chain, for the largest
+#     holders plus a random sample (or every address if "full_balance_check" is ticked)
+# Do not run it while a sync is running.
 on:
   workflow_dispatch:
+    inputs:
+      full_balance_check:
+        description: "Check EVERY address (slower, costs more RPC calls)"
+        type: boolean
+        default: false
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 120
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      FULL: ${{ inputs.full_balance_check }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,5 +28,15 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m indexer verify --chain all
-      - run: python -m indexer status --chain all
+      - name: Supply check
+        run: python -m indexer verify --chain all
+      - name: Balance check
+        run: |
+          if [ "$FULL" = "true" ]; then
+            python -m indexer verify-balances --chain all --all
+          else
+            python -m indexer verify-balances --chain all --top 200 --sample 300
+          fi
+      - name: Status
+        if: always()
+        run: python -m indexer status --chain all
