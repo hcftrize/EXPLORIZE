@@ -3,6 +3,7 @@ check), status. Output never contains URLs, keys or connection strings."""
 
 from __future__ import annotations
 
+import random
 import time
 
 from . import db
@@ -120,3 +121,41 @@ def status_chain(chain: Chain, client, conn, log=print) -> None:
     lag = f", {head - last:,} blocks behind head" if (head and last is not None) else ""
     log(f"[{chain.key}] start {start}, checkpoint {last}{lag}; {s['rows']:,} transfers "
         f"({s['first']} -> {s['last']})")
+
+
+def verify_balances(chain: Chain, client, conn, *, top: int = 200, sample: int = 300,
+                    check_all: bool = False, log=print) -> bool:
+    """Strongest completeness check: for a set of addresses, the balance rebuilt
+    from our transfers must equal balanceOf() read on-chain at the same block.
+    A single missing transfer makes at least one balance wrong."""
+    _, last = db.get_state(conn, chain.chain_id)
+    if last is None:
+        log(f"[{chain.key}] nothing indexed yet")
+        return False
+    block = max(last - chain.reorg_margin, 0)  # stay clear of blocks that may still reorg
+    mine = db.balances_up_to(conn, chain.chain_id, block)
+    addrs = list(mine)
+    if check_all:
+        chosen = addrs
+    else:
+        by_balance = sorted(addrs, key=lambda a: mine[a], reverse=True)
+        chosen = by_balance[:top]
+        rest = by_balance[top:]
+        chosen += random.Random(1).sample(rest, min(sample, len(rest)))  # includes zero balances
+    log(f"[{chain.key}] checking {len(chosen):,} of {len(addrs):,} addresses at block {block:,}")
+
+    calls = [("eth_call", [{"to": chain.token, "data": "0x70a08231" + a.hex().rjust(64, "0")}, hex(block)])
+             for a in chosen]
+    results = client.batch(calls)
+    bad = []
+    for a, r in zip(chosen, results):
+        onchain = int(r, 16)
+        if onchain != mine[a]:
+            bad.append((a, mine[a], onchain))
+    if bad:
+        log(f"[{chain.key}] MISMATCH on {len(bad)} of {len(chosen)} addresses (first 10):")
+        for a, ours, theirs in bad[:10]:
+            log(f"    0x{a.hex()}  ours {ours / 10 ** 18:,.6f}  on-chain {theirs / 10 ** 18:,.6f}")
+        return False
+    log(f"[{chain.key}] balances OK: {len(chosen):,} addresses match on-chain at block {block:,}")
+    return True
