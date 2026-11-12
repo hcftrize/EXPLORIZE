@@ -12,14 +12,17 @@ import requests
 
 
 class RpcError(Exception):
-    def __init__(self, message: str, code: int | None = None):
+    def __init__(self, message: str, code: int | None = None, exhausted: bool = False):
         super().__init__(message)
         self.code = code
+        self.exhausted = exhausted  # True: all retries used up on transient errors (5xx, network)
 
 
 class RangeTooLarge(RpcError):
     """The node refused or could not serve this eth_getLogs range."""
 
+
+SERVER_ERROR_SPLIT_MIN_WIDTH = 100
 
 _RATE_HINTS = ("rate limit", "rate-limit", "too many requests", "throttl", "compute units per second")
 _RANGE_HINTS = (
@@ -57,7 +60,8 @@ class RpcClient:
                 time.sleep(wait)
         self._last = time.monotonic()
 
-    def _post(self, payload, *, range_sensitive: bool = False):
+    def _post(self, payload, *, range_sensitive: bool = False, retries: int | None = None):
+        limit = self.max_retries if retries is None else retries
         attempt = 0
         while True:
             self._throttle()
@@ -82,8 +86,8 @@ class RpcClient:
                         raise RpcError(f"non-JSON answer (http {resp.status_code})")
                     return data
             attempt += 1
-            if attempt > self.max_retries:
-                raise RpcError(f"giving up after {self.max_retries} retries: {err}")
+            if attempt > limit:
+                raise RpcError(f"giving up after {limit} retries: {err}", exhausted=True)
             time.sleep(min(30.0, (2 ** attempt) * 0.25) + random.random() * 0.25)
 
     def _unwrap(self, obj, *, range_sensitive: bool):
@@ -100,11 +104,12 @@ class RpcClient:
             raise RpcError("malformed JSON-RPC answer")
         return obj["result"]
 
-    def call(self, method: str, params: list, *, range_sensitive: bool = False):
+    def call(self, method: str, params: list, *, range_sensitive: bool = False,
+             retries: int | None = None):
         attempt = 0
         while True:
             data = self._post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                              range_sensitive=range_sensitive)
+                              range_sensitive=range_sensitive, retries=retries)
             try:
                 return self._unwrap(data, range_sensitive=range_sensitive)
             except RangeTooLarge:
@@ -153,7 +158,19 @@ class RpcClient:
     def get_logs(self, address: str, topics: list, from_block: int, to_block: int) -> list:
         params = [{"address": address, "topics": topics,
                    "fromBlock": hex(from_block), "toBlock": hex(to_block)}]
-        return self.call("eth_getLogs", params, range_sensitive=True)
+        width = to_block - from_block + 1
+        try:
+            # few retries: a wide range that keeps failing is better split than retried
+            return self.call("eth_getLogs", params, range_sensitive=True, retries=2)
+        except RangeTooLarge:
+            raise
+        except RpcError as e:
+            # Some nodes answer HTTP 500 for ranges they cannot serve (seen on Polygon
+            # for 100k blocks). On a wide range, treat that as "too large" and split.
+            # On a narrow range it is a real outage: fail fast instead of splitting forever.
+            if e.exhausted and width > SERVER_ERROR_SPLIT_MIN_WIDTH:
+                raise RangeTooLarge(str(e)) from e
+            raise
 
     def get_block_timestamps(self, blocks) -> dict[int, int]:
         blocks = sorted(set(blocks))
