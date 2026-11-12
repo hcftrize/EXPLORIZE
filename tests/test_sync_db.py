@@ -124,3 +124,20 @@ def test_chunk_size_does_not_oscillate_when_node_has_a_ceiling(conn):
     sync_chain(big, c, conn, log=lambda *_: None)
     assert count(conn) == len(logs)
     assert c.get_logs_calls < 450  # without a learned ceiling it needs ~530
+
+
+def test_sync_retries_a_chunk_after_a_transient_rpc_error(conn, monkeypatch):
+    from indexer.rpc import RpcError
+
+    class Flaky(FakeClient):
+        def get_logs(self, address, topics, lo, hi):
+            if self.get_logs_calls < 2:
+                self.get_logs_calls += 1
+                raise RpcError("pruned history unavailable")
+            return super().get_logs(address, topics, lo, hi)
+
+    monkeypatch.setattr("indexer.sync.time.sleep", lambda *_: None)
+    logs = build_chain(2000)
+    c = Flaky(logs, 2000, deploy_block=5)
+    sync_chain(CHAIN, c, conn, log=lambda *_: None)
+    assert count(conn) == len(logs)
