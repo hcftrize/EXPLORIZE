@@ -52,7 +52,7 @@ def probe_chain(chain: Chain, client, log=print) -> bool:
     # Real eth_getLogs limits on this node/plan.
     end = max(head - 100, 1)
     sample = None
-    for width in (1_000, 10_000, 100_000, 1_000_000):
+    for width in (1, 100, 1_000, 10_000, 100_000, 1_000_000):
         lo = max(end - width + 1, 0)
         t = time.monotonic()
         try:
