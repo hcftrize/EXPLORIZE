@@ -63,7 +63,7 @@ def read_bonds(client, block: str, max_id: int, log) -> dict[int, dict]:
                   (GOVERNANCE, call_uint(SEL_VESTED, i)),
                   (GOVERNANCE, call_uint(SEL_GET_BOND_RELEASE, i))]
     log(f"Reading {max_id} bond ids ({len(calls)} sub-calls) at block {int(block, 16)} ...")
-    res = multicall(client, calls, block, group=400, log=log)
+    res = multicall(client, calls, block, group=250, log=log)
     bonds: dict[int, dict] = {}
     for n, i in enumerate(range(1, max_id + 1)):
         (ok_o, o), (ok_b, b), (ok_k, k), (ok_v, v), (ok_q, q) = res[5 * n:5 * n + 5]
@@ -256,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     clients = {k: RpcClient(config.rpc_url(c), batch_size=config.env_int("RPC_BATCH_SIZE", 3),
                             max_rps=float(config.env_int("RPC_MAX_RPS", 20)))
                for k, c in chains.items()}
+    for cl in clients.values():          # fail fast and visibly instead of waiting minutes on a stuck node
+        cl.timeout = 25.0
+        cl.max_retries = 3
     conn = None
     try:
         from . import db
@@ -266,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if run(clients, chains, args.max_id, conn, log) else 1
     except RpcError as e:
         log(f"FAILED: {type(e).__name__}: {e}")
+        return 1
+    except Exception as e:  # never end without saying why
+        import traceback
+        traceback.print_exc()
+        log(f"CRASHED: {type(e).__name__}: {e}")
         return 1
 
 
