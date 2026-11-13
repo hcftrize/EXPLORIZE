@@ -10,6 +10,8 @@ ABI reminders (everything is 32-byte words):
 
 from __future__ import annotations
 
+import time
+
 from .rpc import RpcError
 
 MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
@@ -102,13 +104,20 @@ def decode_aggregate3(hex_answer: str) -> list[tuple[bool, bytes]]:
 
 
 def multicall(client, calls: list[tuple[str, bytes]], block: str = "latest",
-              *, group: int = 400, min_group: int = 10, log=None) -> list[tuple[bool, bytes]]:
-    """Run `calls` through Multicall3 in groups; a group the node refuses is halved and retried."""
+              *, group: int = 250, min_group: int = 10, log=None) -> list[tuple[bool, bytes]]:
+    """Run `calls` through Multicall3 in groups; a group the node refuses is halved and retried.
+
+    With `log`, prints progress (first group, every 10th group, and any slow group) so a slow node
+    is visible instead of silent.
+    """
     out: list[tuple[bool, bytes]] = []
     i = 0
     size = max(1, group)
+    n_groups = 0
+    t0 = time.monotonic()
     while i < len(calls):
         part = calls[i:i + size]
+        t1 = time.monotonic()
         try:
             raw = client.eth_call(MULTICALL3, encode_aggregate3(part), block)
             res = decode_aggregate3(raw)
@@ -118,11 +127,15 @@ def multicall(client, calls: list[tuple[str, bytes]], block: str = "latest",
             if size > min_group:
                 size = max(min_group, size // 2)
                 if log:
-                    log(f"  multicall group refused ({type(e).__name__}); retrying with {size} calls")
+                    log(f"  multicall group refused ({type(e).__name__}: {str(e)[:120]}); retrying with {size} calls")
                 continue
             raise
         out.extend(res)
         i += len(part)
+        n_groups += 1
+        took = time.monotonic() - t1
+        if log and len(calls) > 3 * size and (n_groups == 1 or n_groups % 10 == 0 or took > 8 or i >= len(calls)):
+            log(f"  ... {i}/{len(calls)} sub-calls read ({time.monotonic() - t0:.0f}s elapsed, last group {took:.1f}s)")
     return out
 
 
