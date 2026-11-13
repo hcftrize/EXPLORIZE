@@ -178,6 +178,9 @@ class RpcClient:
                 raise RangeTooLarge(str(e)) from e
             raise
 
+    def get_transaction_receipt(self, tx_hash: str):
+        return self.call("eth_getTransactionReceipt", [tx_hash])
+
     def get_block_timestamps(self, blocks) -> dict[int, int]:
         blocks = sorted(set(blocks))
         results = self.batch([("eth_getBlockByNumber", [hex(b), False]) for b in blocks])
