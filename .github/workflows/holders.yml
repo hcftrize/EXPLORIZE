@@ -1,0 +1,36 @@
+name: Explorize holders
+
+# Rebuilds the RIZE Top Holders ranking (live balances on 4 chains + governance bonds on Base).
+# Separate from the transfer sync on purpose: if one fails, the other keeps working.
+# Runs once a day by itself, and can be started by hand (Run workflow). To change the pace, edit the cron line.
+# A failed run writes nothing: the previous ranking stays online ("updated X ago" on the page shows its age).
+on:
+  schedule:
+    - cron: "41 5 * * *"      # every day at 05:41 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = read and print the top 10, write nothing"
+        default: "false"
+
+concurrency:
+  group: explorize-holders
+  cancel-in-progress: false
+
+jobs:
+  holders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          if [ "$DRY_RUN" = "true" ]; then python -u -m indexer.holders --dry-run; else python -u -m indexer.holders; fi
