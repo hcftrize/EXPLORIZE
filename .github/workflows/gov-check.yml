@@ -1,0 +1,28 @@
+name: Explorize governance check
+
+# Diagnostic, read only: reads every T-RIZE bond on Base through Multicall3 at one pinned block and checks
+# the assumptions of the Top Holders job (contract balance = bonded + queued, release queues, vesting,
+# three witness wallets, our transfers vs the contract). Writes nothing anywhere.
+on:
+  workflow_dispatch:
+    inputs:
+      max_id:
+        description: "Highest bond id to scan"
+        default: "11000"
+
+jobs:
+  gov-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      MAX_ID: ${{ inputs.max_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m indexer.governance --max-id "$MAX_ID"
