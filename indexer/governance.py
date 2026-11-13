@@ -53,19 +53,19 @@ def when(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def read_bonds(client, block: str, max_id: int, log) -> dict[int, dict]:
-    """One snapshot of every bond id 1..max_id (5 views per id)."""
+def read_bonds(client, block: str, max_id: int, log, first: int = 1) -> dict[int, dict]:
+    """One snapshot of every bond id first..max_id (5 views per id)."""
     calls = []
-    for i in range(1, max_id + 1):
+    for i in range(first, max_id + 1):
         calls += [(BOND_NFT, call_uint(SEL_OWNER_OF, i)),
                   (GOVERNANCE, call_uint(SEL_BONDED, i)),
                   (GOVERNANCE, call_uint(SEL_BROKEN_BOND, i)),
                   (GOVERNANCE, call_uint(SEL_VESTED, i)),
                   (GOVERNANCE, call_uint(SEL_GET_BOND_RELEASE, i))]
-    log(f"Reading {max_id} bond ids ({len(calls)} sub-calls) at block {int(block, 16)} ...")
+    log(f"Reading bond ids {first}..{max_id} ({len(calls)} sub-calls) at block {int(block, 16)} ...")
     res = multicall(client, calls, block, group=250, log=log)
     bonds: dict[int, dict] = {}
-    for n, i in enumerate(range(1, max_id + 1)):
+    for n, i in enumerate(range(first, max_id + 1)):
         (ok_o, o), (ok_b, b), (ok_k, k), (ok_v, v), (ok_q, q) = res[5 * n:5 * n + 5]
         bonds[i] = {
             "exists": ok_o and len(o) >= 32,
