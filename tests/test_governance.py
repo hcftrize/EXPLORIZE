@@ -60,6 +60,8 @@ class FakeGovClient:
         self.fail_big_groups = fail_big_groups
         self.group_sizes = []
         self.token = None
+        self.balances = None        # {address int: raw balance}; None = old behaviour (contract balance only)
+        self.fail_balances = False
 
     def total(self):
         return (sum(self.bonded.values()) + sum(a for q in self.queue.values() for a, _ in q)) * self.scale
@@ -88,7 +90,12 @@ class FakeGovClient:
             sel, arg = cd[:4].hex(), int.from_bytes(cd[4:36], "big") if len(cd) >= 36 else None
             s = self.scale
             if sel == mc.SEL_BALANCE_OF:
-                out.append((True, word(self.total() + self.balance_extra)))
+                if self.fail_balances and arg != int(governance.GOVERNANCE, 16):
+                    raise RpcError("node unavailable")
+                if self.balances is not None and arg != int(governance.GOVERNANCE, 16):
+                    out.append((True, word(self.balances.get(arg, 0))))
+                else:
+                    out.append((True, word(self.total() + self.balance_extra)))
             elif sel == mc.SEL_TOTAL_SUPPLY:
                 out.append((True, word(len(self.owner))))
             elif sel == mc.SEL_GET_RELEASE_WARMUP:
