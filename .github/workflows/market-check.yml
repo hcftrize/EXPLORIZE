@@ -1,0 +1,51 @@
+name: Explorize market check
+
+# Diagnostic, read only. Two modes:
+#   trade-check : reads the receipt of each transaction and prints how the reconciliation understands it
+#                 (sell / buy / liquidity / arbitrage / transfer, trader, pools, fees, relays, price).
+#   classify    : takes the busiest addresses of the transfers table (plus any you add) and asks the chain what
+#                 each one is: wallet, pool (tokens, fee, factory, reserves) or other contract.
+# Writes nothing anywhere.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "trade-check or classify"
+        type: choice
+        default: trade-check
+        options:
+          - trade-check
+          - classify
+      chain:
+        description: "Chain (base, ethereum, bsc, polygon)"
+        default: "base"
+      txs:
+        description: "trade-check: transaction hashes, comma separated (empty = the MetaMask sale of 2M RIZE)"
+        default: ""
+      top:
+        description: "classify: how many of the busiest addresses to classify"
+        default: "40"
+      addresses:
+        description: "classify: extra addresses, comma separated (optional)"
+        default: ""
+
+jobs:
+  market-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      MODE: ${{ inputs.mode }}
+      CHAIN: ${{ inputs.chain }}
+      TXS: ${{ inputs.txs }}
+      TOP: ${{ inputs.top }}
+      ADDRESSES: ${{ inputs.addresses }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -u -m indexer.market_check "$MODE" --chain "$CHAIN" --txs "$TXS" --top "$TOP" --addresses "$ADDRESSES"
