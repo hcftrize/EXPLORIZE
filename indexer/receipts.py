@@ -14,7 +14,13 @@ Inputs are the logs of the receipt only: ERC-20 Transfer events, wrapped-native 
 tell us which addresses are pools. Native ETH sent by a router has no log, so a sale paid in ETH shows up on the
 pool side (the pool paid out WETH); the report says so.
 
-Pure functions, no network: they are tested against a fake receipt built from a real MetaMask swap.
+Beyond the net table the module separates the roles around a trade: the seller / buyer, the pools that filled it,
+RIZE fee recipients (integrators skimming RIZE on a sell), second-hop swaps (pool proceeds swapped again, e.g. USDC
+to WETH to native ETH), the address that received the proceeds when it is not the seller, and the profit of a round
+trip between two pools. Swap / Mint / Burn / Collect events are decoded so their amounts can be checked against
+the token movements.
+
+Pure functions, no network: they are tested against fake receipts modelled on real transactions.
 """
 
 from __future__ import annotations
@@ -42,6 +48,9 @@ BURN_TOPICS = {
     "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",   # V2-style Burn
 }
 COLLECT_TOPIC = "0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0"  # V3-style Collect (fees / tokens taken out)
+V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"
+V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"
 
 # Wrapped native token of each chain (WETH on Base and Ethereum, WBNB, WPOL)
 WRAPPED_NATIVE = {
@@ -50,7 +59,15 @@ WRAPPED_NATIVE = {
     "bsc": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
     "polygon": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
 }
-# Used only to price a trade when the counter asset is a dollar stablecoin (matched on the symbol read on-chain)
+# Dollar stablecoins, by ADDRESS (a symbol can be copied by anyone: impostor tokens named "RIZE" exist on Base).
+# Only these are used to price a trade in dollars. Other chains: to be filled once confirmed.
+STABLES = {
+    "base": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",   # USDC
+        "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",   # USDT
+    },
+}
+# Fallback used only when no address list is given (tests, quick experiments)
 STABLE_SYMBOLS = {"USDC", "USDT", "DAI", "USDBC", "USDC.E", "USDT0", "USDS", "FDUSD", "LUSD", "GHO"}
 
 
@@ -62,34 +79,63 @@ def _sign(n: int) -> int:
     return (n > 0) - (n < 0)
 
 
+def _s256(n: int) -> int:
+    return n - (1 << 256) if n >= (1 << 255) else n
+
+
 @dataclass
 class Recon:
-    verdict: str                                   # sell | buy | arbitrage | liquidity_add | liquidity_remove | transfer | mint | burn | passthrough | unknown
+    verdict: str                                   # sell | buy | arbitrage | liquidity_* | fee_collect | transfer | mint | burn | passthrough | unknown
     note: str = ""
     nets: dict = field(default_factory=dict)       # address -> {token: net raw amount}
     transfers: list = field(default_factory=list)  # (log_index, token, from, to, amount) as emitted
     swap_pools: list = field(default_factory=list)
-    traders: list = field(default_factory=list)
-    venues: list = field(default_factory=list)
-    relays: list = field(default_factory=list)
-    fees: list = field(default_factory=list)       # (address, token, amount)
-    fills: list = field(default_factory=list)      # {"pool", "rize", "counter": {token: amount}}
-    trader_rize: int = 0                           # net RIZE of the traders (negative = sold)
-    trader_counter: dict = field(default_factory=dict)  # token -> net amount the traders received (+) / paid (-)
+    traders: list = field(default_factory=list)    # sellers / buyers / liquidity providers
+    venues: list = field(default_factory=list)     # pools that filled the trade
+    relays: list = field(default_factory=list)     # moved tokens, net zero
+    fees: list = field(default_factory=list)       # (address, token, amount): small recipients of the counter asset
+    fills: list = field(default_factory=list)      # {"pool", "rize", "counter": {token: amount}, "dir": +1 pool received RIZE}
+    trader_rize: int = 0                           # RIZE the traders gave (-) or received (+)
+    pool_rize: int = 0                             # net RIZE of the pools: + sold into pools, - bought from pools
+    trader_counter: dict = field(default_factory=dict)  # token -> net amount the traders received (sell) / paid (buy)
     gross_counter: dict = field(default_factory=dict)   # token -> what the pools exchanged against RIZE
     counter_source: str = ""                       # "trader" (their own net) | "pools" (pool side only)
     swap_count: int = 0                            # Swap events seen in the receipt (any pool)
+    swaps: list = field(default_factory=list)      # (pool, log_index, net0, net1) from the pool's side
     lp_pools: dict = field(default_factory=dict)   # pool -> set of {"mint","burn","collect"} seen
+    lp_events: list = field(default_factory=list)  # (pool, log_index, kind, amount0, amount1)
+    rize_fees: list = field(default_factory=list)  # (address, amount): RIZE skimmed on a sell / buy
+    hops: list = field(default_factory=list)       # addresses doing a second swap on the proceeds
+    payees: list = field(default_factory=list)     # (address, token, amount, share): got most of the pool proceeds
+    payers: list = field(default_factory=list)     # (address, token, amount, share): paid most of a buy
+    profit: dict = field(default_factory=dict)     # arbitrage: token -> gross gain
+    native_in: int = 0                             # wrapped native created (Deposit events)
+    native_out: int = 0                            # wrapped native unwrapped to native coin (Withdrawal events)
+    tx_value: int = 0                              # native coin sent with the transaction
 
 
-def parse_logs(receipt: dict, wrapped: str):
-    """-> (nets, transfers, swap_pools, seen, swap_count, lp) from the receipt logs."""
+@dataclass
+class Parsed:
+    nets: dict
+    transfers: list
+    pools: set
+    seen: set
+    swaps: list
+    lp: dict
+    lp_events: list
+    native_in: int
+    native_out: int
+
+
+def parse_logs(receipt: dict, wrapped: str) -> Parsed:
     nets: dict[str, dict[str, int]] = {}
     transfers: list = []
     pools: set[str] = set()
     seen: set[str] = set()
-    swaps = 0
+    swaps: list = []
     lp: dict[str, set[str]] = {}
+    lp_events: list = []
+    n_in = n_out = 0
 
     def add(a: str, token: str, delta: int) -> None:
         d = nets.setdefault(a, {})
@@ -104,42 +150,59 @@ def parse_logs(receipt: dict, wrapped: str):
         token = lg["address"].lower()
         data = (lg.get("data") or "0x")[2:]
         idx = int(lg["logIndex"], 16) if isinstance(lg.get("logIndex"), str) else int(lg.get("logIndex") or 0)
+        words = [int(data[i:i + 64], 16) for i in range(0, len(data) - 63, 64)]
         t0 = topics[0]
         if t0 == TRANSFER_TOPIC0 and len(topics) == 3 and len(data) >= 64:      # ERC-20 (ERC-721 has 4 topics)
-            frm, to, amount = _addr(topics[1]), _addr(topics[2]), int(data[:64], 16)
+            frm, to, amount = _addr(topics[1]), _addr(topics[2]), words[0]
             transfers.append((idx, token, frm, to, amount))
             add(frm, token, -amount)
             add(to, token, amount)
             seen.update((frm, to))
-        elif t0 == DEPOSIT_TOPIC0 and token == wrapped and len(topics) == 2 and len(data) >= 64:
-            dst = _addr(topics[1]); add(dst, token, int(data[:64], 16)); seen.add(dst)
-        elif t0 == WITHDRAWAL_TOPIC0 and token == wrapped and len(topics) == 2 and len(data) >= 64:
-            src = _addr(topics[1]); add(src, token, -int(data[:64], 16)); seen.add(src)
+        elif t0 == DEPOSIT_TOPIC0 and token == wrapped and len(topics) == 2 and words:
+            dst = _addr(topics[1]); add(dst, token, words[0]); seen.add(dst); n_in += words[0]
+        elif t0 == WITHDRAWAL_TOPIC0 and token == wrapped and len(topics) == 2 and words:
+            src = _addr(topics[1]); add(src, token, -words[0]); seen.add(src); n_out += words[0]
         elif t0 in SWAP_TOPICS:
             pools.add(token)
-            swaps += 1
+            if t0 == V2_SWAP_TOPIC and len(words) >= 4:
+                swaps.append((token, idx, words[0] - words[2], words[1] - words[3]))   # in - out, pool's side
+            elif len(words) >= 2:
+                swaps.append((token, idx, _s256(words[0]), _s256(words[1])))           # signed, pool's side
+            else:
+                swaps.append((token, idx, 0, 0))
         elif t0 in MINT_TOPICS:
             lp.setdefault(token, set()).add("mint")
+            a = (words[0], words[1]) if t0 == V2_MINT_TOPIC and len(words) >= 2 else (
+                (words[2], words[3]) if len(words) >= 4 else (None, None))
+            lp_events.append((token, idx, "mint", *a))
         elif t0 in BURN_TOPICS:
             lp.setdefault(token, set()).add("burn")
+            a = (words[0], words[1]) if t0 == V2_BURN_TOPIC and len(words) >= 2 else (
+                (words[1], words[2]) if len(words) >= 3 else (None, None))
+            lp_events.append((token, idx, "burn", *a))
         elif t0 == COLLECT_TOPIC:
             lp.setdefault(token, set()).add("collect")
+            a = (words[1], words[2]) if len(words) >= 3 else (None, None)
+            lp_events.append((token, idx, "collect", *a))
     for a in list(nets):                         # drop zero nets: those addresses are relays
         nets[a] = {t: v for t, v in nets[a].items() if v != 0}
         if not nets[a]:
             del nets[a]
-    return nets, transfers, pools, seen, swaps, lp
+    return Parsed(nets, transfers, pools, seen, swaps, lp, lp_events, n_in, n_out)
 
 
-def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None) -> Recon:
+def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0) -> Recon:
     rize = rize.lower()
     wrapped = (wrapped or "").lower()
-    nets, transfers, pools, seen, swaps, lp = parse_logs(receipt, wrapped)
-    r = Recon(verdict="unknown", nets=nets, transfers=sorted(transfers), swap_pools=sorted(pools),
-              swap_count=swaps, lp_pools=lp)
+    P = parse_logs(receipt, wrapped)
+    nets, pools, lp = P.nets, P.pools, P.lp
+    r = Recon(verdict="unknown", nets=nets, transfers=sorted(P.transfers), swap_pools=sorted(pools),
+              swap_count=len(P.swaps), swaps=sorted(P.swaps, key=lambda x: x[1]), lp_pools=lp,
+              lp_events=sorted(P.lp_events, key=lambda x: x[1]), native_in=P.native_in, native_out=P.native_out,
+              tx_value=tx_value)
     rz = {a: n[rize] for a, n in nets.items() if n.get(rize)}              # parties with a net RIZE change
     others = lambda a: {t: v for t, v in nets.get(a, {}).items() if t != rize}  # noqa: E731
-    moved = {a for a in seen if a != ZERO}
+    moved = {a for a in P.seen if a != ZERO}
     r.relays = sorted(a for a in moved if a not in nets)                    # moved tokens but net zero everywhere
 
     if not rz:
@@ -173,8 +236,8 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
     venues = sorted(a for a in rz if a in pools)
     if venues:
         sum_v = sum(rz[v] for v in venues)
-        traders = sorted(a for a in rz if a not in pools)
-        r.venues, r.traders = venues, traders
+        r.venues = venues
+        r.traders = sorted(a for a in rz if a not in pools)
         if sum_v == 0:
             r.verdict, r.note = "arbitrage", "pools exchanged RIZE with each other; net RIZE zero"
         else:
@@ -225,27 +288,105 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
             return r
 
     r.trader_rize = sum(rz[a] for a in r.traders)
+    if r.verdict not in ("sell", "buy", "arbitrage"):
+        for a in r.traders:
+            for t, v in others(a).items():
+                r.trader_counter[t] = r.trader_counter.get(t, 0) + v
+        return r
+
+    # ---- a trade: pools, fills, then the role of every other address -------------------------------------
+    direction = _sign(sum(rz[v] for v in r.venues))                 # +1 sold into pools, -1 bought, 0 round trip
+    if direction:                                                   # a pool whose Swap event we did not recognise
+        for a in sorted(rz):
+            if (a not in r.venues and a != ZERO and _sign(rz[a]) == direction
+                    and any(_sign(v) == -direction for v in others(a).values())):
+                r.venues = sorted(r.venues + [a])
+                r.note = (r.note + "; " if r.note else "") + f"venue without a recognised Swap event: {a[:10]}"
+    venues = set(r.venues)
+    r.pool_rize = sum(rz[v] for v in r.venues)
+    for v in r.venues:
+        counter = {t: abs(x) for t, x in others(v).items() if _sign(x) == -_sign(rz[v])}
+        r.fills.append({"pool": v, "rize": abs(rz[v]), "counter": counter, "dir": _sign(rz[v])})   # +1: pool received RIZE
+        for t, x in counter.items():
+            r.gross_counter[t] = r.gross_counter.get(t, 0) + x
+
+    if direction > 0:                                               # sell: who gave RIZE vs who skimmed some
+        r.traders = sorted(a for a in rz if a not in venues and a != ZERO and rz[a] < 0)
+        r.rize_fees = sorted((a, rz[a]) for a in rz if a not in venues and a != ZERO and rz[a] > 0)
+    elif direction < 0:                                             # buy: the big receivers are buyers, small ones fees
+        pos = {a: x for a, x in rz.items() if a not in venues and a != ZERO and x > 0}
+        tot = sum(pos.values())
+        r.traders = sorted(a for a, x in pos.items() if x * 10 >= tot) + sorted(
+            a for a in rz if a not in venues and a != ZERO and rz[a] < 0)
+        r.rize_fees = sorted((a, x) for a, x in pos.items() if x * 10 < tot)
+    else:
+        r.traders = sorted(a for a in rz if a not in venues and a != ZERO)
+    r.trader_rize = sum(rz[a] for a in r.traders)
+
     for a in r.traders:
         for t, v in others(a).items():
             r.trader_counter[t] = r.trader_counter.get(t, 0) + v
-    if r.verdict in ("sell", "buy", "arbitrage"):
-        for v in r.venues:
-            counter = {t: abs(x) for t, x in others(v).items() if _sign(x) == -_sign(rz[v])}
-            r.fills.append({"pool": v, "rize": abs(rz[v]), "counter": counter, "dir": _sign(rz[v])})   # +1: pool received RIZE
-            for t, x in counter.items():
-                r.gross_counter[t] = r.gross_counter.get(t, 0) + x
-        want = 1 if r.verdict == "sell" else -1                 # the traders should RECEIVE the counter on a sell
-        seen_by_trader = {t: x for t, x in r.trader_counter.items() if _sign(x) == want}
-        r.counter_source = "trader" if seen_by_trader else "pools"
-        r.trader_counter = seen_by_trader if seen_by_trader else {}
-        known = set(r.traders) | set(r.venues)
-        for a, n in nets.items():                                # small leftovers: fees
-            if a in known or rz.get(a) or a == ZERO:
-                continue
-            for t, x in n.items():
-                if t != rize and _sign(x) == want:
-                    r.fees.append((a, t, x))
+    want = 1 if direction >= 0 else -1                              # sell: traders RECEIVE the counter; buy: they PAY it
+    seen_by_trader = {t: x for t, x in r.trader_counter.items() if _sign(x) == want}
+    r.counter_source = "trader" if seen_by_trader else "pools"
+    r.trader_counter = seen_by_trader
+
+    known = venues | set(r.traders) | {a for a, _ in r.rize_fees} | {ZERO}
+    for a in sorted(nets):
+        if a in known:
+            continue
+        o = others(a)
+        pos = {t: v for t, v in o.items() if v > 0}
+        neg = {t: v for t, v in o.items() if v < 0}
+        if pos and neg:                                             # swapped the proceeds again (second hop)
+            r.hops.append(a)
+            continue
+        for t, x in pos.items():
+            base = r.gross_counter.get(t)
+            share = Decimal(x) / Decimal(base) if base else None
+            if direction == 0:
+                r.payees.append((a, t, x, share))                   # the one who walks away with the gain
+            elif share is not None and share >= Decimal("0.5"):
+                r.payees.append((a, t, x, share))
+            else:
+                r.fees.append((a, t, x))
+        if direction < 0:
+            for t, x in neg.items():
+                base = r.gross_counter.get(t)
+                share = Decimal(-x) / Decimal(base) if base else None
+                if share is not None and share >= Decimal("0.5"):
+                    r.payers.append((a, t, -x, share))
+    if direction == 0:                                              # gain of the round trip = what the pools gave up
+        tokens = {t for v in venues for t in others(v)}
+        for t in tokens:
+            g = -sum(nets.get(v, {}).get(t, 0) for v in venues)
+            if g:
+                r.profit[t] = g
     return r
+
+
+# ----------------------------------------------------------------------------------------------- checks
+def swap_check(r: Recon, pool_tokens: dict, short=lambda a: a) -> list[str]:
+    """Does the sum of a pool's Swap events equal what the pool really gained / lost in tokens?
+    pool_tokens: pool -> (token0, token1). This is what allows reading trades from pool logs without receipts."""
+    out = []
+    by_pool: dict[str, list] = {}
+    for pool, _, n0, n1 in r.swaps:
+        by_pool.setdefault(pool, []).append((n0, n1))
+    for pool, evs in sorted(by_pool.items()):
+        toks = pool_tokens.get(pool)
+        if not toks:
+            out.append(f"   {short(pool)}: {len(evs)} swap event(s); token0/token1 unknown, not checked")
+            continue
+        e0, e1 = sum(a for a, _ in evs), sum(b for _, b in evs)
+        t0, t1 = r.nets.get(pool, {}).get(toks[0], 0), r.nets.get(pool, {}).get(toks[1], 0)
+        if pool in r.lp_pools:
+            out.append(f"   {short(pool)}: swap events AND liquidity events in the same tx; not compared")
+        else:
+            ok = (e0 == t0 and e1 == t1)
+            out.append(f"   {short(pool)}: {len(evs)} swap event(s) -> {'MATCH' if ok else 'DIFFERENT'}"
+                       + ("" if ok else f" (events {e0}/{e1} vs transfers {t0}/{t1})"))
+    return out
 
 
 # ----------------------------------------------------------------------------------------------- report
@@ -255,52 +396,112 @@ def fmt_amount(raw: int, decimals: int = 18, places: int = 6) -> str:
     return s if s not in ("", "-0") else "0"
 
 
-def report(r: Recon, rize: str, meta: dict, short=lambda a: a) -> list[str]:
-    """Readable lines. meta: token address -> (symbol, decimals)."""
+def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, brief: bool = False,
+           pool_tokens: dict | None = None) -> list[str]:
+    """Readable lines. meta: token address -> (symbol, decimals). stables: addresses priced as one dollar."""
     rize = rize.lower()
+    pool_tokens = pool_tokens or {}
 
     def sym(t: str) -> str:
         return meta.get(t, (t[:8] + "…", 18))[0]
 
+    def dec(t: str) -> int:
+        return meta.get(t, ("", 18))[1]
+
     def amt(t: str, raw: int) -> str:
-        return fmt_amount(raw, meta.get(t, ("", 18))[1]) + " " + sym(t)
+        return fmt_amount(raw, dec(t)) + " " + sym(t)
+
+    def is_stable(t: str) -> bool:
+        return (t in stables) if stables is not None else sym(t).upper() in STABLE_SYMBOLS
+
+    def usd_per_rize(counter_raw: int, token: str, rize_raw: int):
+        if not rize_raw:
+            return None
+        return Decimal(counter_raw) / Decimal(10) ** dec(token) / (Decimal(rize_raw) / Decimal(10) ** 18)
+
+    def role_of(a: str) -> str:
+        return ("trader" if a in r.traders else "pool" if a in r.venues else "RIZE fee" if a in {x for x, _ in r.rize_fees}
+                else "second swap" if a in r.hops else "pool (Swap event)" if a in r.swap_pools
+                else "proceeds" if a in {x[0] for x in r.payees} else "fee" if a in {x[0] for x in r.fees} else "other")
 
     out = [f"VERDICT: {r.verdict.upper()}" + (f"   ({r.note})" if r.note else "")]
     out.append("Net change per address (zero nets hidden):")
     for a, n in sorted(r.nets.items(), key=lambda kv: -abs(kv[1].get(rize, 0))):
-        role = ("trader" if a in r.traders else "venue/pool" if a in r.venues else
-                "pool (Swap event)" if a in r.swap_pools else "other")
         parts = ", ".join(("+" if v > 0 else "-") + amt(t, abs(v)) for t, v in sorted(n.items(), key=lambda kv: kv[0] != rize))
-        out.append(f"   {short(a)}  [{role}]  {parts}")
+        out.append(f"   {short(a)}  [{role_of(a)}]  {parts}")
     if r.relays:
         out.append("Relays (moved tokens, net zero, hidden): " + ", ".join(short(a) for a in r.relays))
-    if r.verdict in ("sell", "buy", "arbitrage"):
-        rz = abs(r.trader_rize)
-        paid = r.trader_counter if r.counter_source == "trader" else r.gross_counter
-        what = "SOLD" if r.verdict == "sell" else "BOUGHT" if r.verdict == "buy" else "CYCLED"
-        out.append(f"{what} {amt(rize, rz)}" + (" for " + " + ".join(amt(t, abs(x)) for t, x in paid.items()) if paid else ""))
-        if r.counter_source == "pools" and paid:
-            out.append("   (the traders' own counter-asset change is not visible in the logs, e.g. paid in native ETH: "
-                       "amount taken from the pool side, shown as the wrapped token)")
-        stable = [t for t in paid if sym(t).upper() in STABLE_SYMBOLS]
-        if stable and rz:
-            t = stable[0]
-            dec = meta.get(t, ("", 18))[1]
-            net_price = Decimal(abs(paid[t])) / Decimal(10) ** dec / (Decimal(rz) / Decimal(10) ** 18)
-            out.append(f"Average price (what the trader got/paid): ${net_price:.6f} per RIZE")
-            if r.gross_counter.get(t) and r.counter_source == "trader":
-                gross = Decimal(r.gross_counter[t]) / Decimal(10) ** dec / (Decimal(rz) / Decimal(10) ** 18)
-                out.append(f"Price at the pools (before fees): ${gross:.6f} per RIZE")
-        if r.fees:
-            for a, t, x in r.fees:
-                base = r.gross_counter.get(t)
-                pct = f"  = {Decimal(x) * 100 / Decimal(base):.3f}% of the pool amount" if base else ""
-                out.append(f"Fee / other recipient: {short(a)} receives {amt(t, x)}{pct}")
+
+    if r.verdict in ("sell", "buy"):
+        sold = r.verdict == "sell"
+        pool_r = abs(r.pool_rize)
+        gross = " + ".join(amt(t, x) for t, x in r.gross_counter.items())
+        out.append(f"{'SOLD' if sold else 'BOUGHT'} {amt(rize, pool_r)} {'into' if sold else 'out of'} {len(r.fills)} pool(s)"
+                   + (f" for {gross}" if gross else "") + "  (pool side, exact)")
+        who = "Seller" if sold else "Buyer"
+        for a in r.traders:
+            out.append(f"   {who} {short(a)} {'gave' if r.nets[a][rize] < 0 else 'received'} {amt(rize, abs(r.nets[a][rize]))}")
+        total_t = abs(r.trader_rize)
+        for a, x in r.rize_fees:
+            pct = f" = {Decimal(abs(x)) * 100 / Decimal(max(total_t, 1)):.3f}% of the RIZE the {who.lower()} handled"
+            out.append(f"   RIZE fee / skim: {short(a)} gets {amt(rize, abs(x))}{pct}")
+        if r.trader_counter:
+            got = " + ".join(amt(t, abs(x)) for t, x in r.trader_counter.items())
+            out.append(f"   {who} {'received' if sold else 'paid'} {got} (their own net)")
+            st = [t for t in r.trader_counter if is_stable(t)]
+            if st:
+                px = usd_per_rize(abs(r.trader_counter[st[0]]), st[0], abs(r.trader_rize))
+                if px:
+                    out.append(f"   Average price (what the {who.lower()} got/paid): ${px:.6f} per RIZE")
+        for a, t, x, share in r.payees:
+            out.append(f"   Proceeds delivered to {short(a)}: {amt(t, x)} = {share:.1%} of the pool amount "
+                       f"(not to the {who.lower()}; could be their own other account or a settlement contract)")
+        for a, t, x, share in r.payers:
+            out.append(f"   Paid by {short(a)} (not the buyer): {amt(t, x)} = {share:.1%} of the pool amount")
+        for a in r.hops:
+            n = r.nets[a]
+            out.append(f"   Second swap at {short(a)}: " + " / ".join(("+" if v > 0 else "-") + amt(t, abs(v)) for t, v in n.items()))
+        if sold and r.native_out:
+            out.append(f"   Wrapped native unwrapped: {fmt_amount(r.native_out, 18)} ETH-equivalent paid out as native coin "
+                       "(the recipient is not visible in the logs)")
+        if not sold and r.tx_value:
+            out.append(f"   Paid with native coin: transaction value {fmt_amount(r.tx_value, 18)} ETH")
+        if not sold and r.native_in and not r.tx_value:
+            out.append(f"   Native coin wrapped in this transaction: {fmt_amount(r.native_in, 18)}")
+        for a, t, x in r.fees:
+            base = r.gross_counter.get(t)
+            pct = f"  = {Decimal(x) * 100 / Decimal(base):.3f}% of the pool amount" if base else ""
+            out.append(f"   Fee / other recipient: {short(a)} receives {amt(t, x)}{pct}")
+    elif r.verdict == "arbitrage" and r.fills:
+        bought = [f for f in r.fills if f["dir"] < 0]
+        sold = [f for f in r.fills if f["dir"] > 0]
+        if bought and sold:
+            def side(fs):
+                tot: dict = {}
+                for f in fs:
+                    for t, x in f["counter"].items():
+                        tot[t] = tot.get(t, 0) + x
+                return " + ".join(amt(t, x) for t, x in tot.items())
+            vol = min(sum(f["rize"] for f in bought), sum(f["rize"] for f in sold))
+            out.append(f"ROUND TRIP of {amt(rize, vol)} between pools: bought at {', '.join(short(f['pool']) for f in bought)} "
+                       f"for {side(bought)}, sold at {', '.join(short(f['pool']) for f in sold)} for {side(sold)}")
+        for t, g in r.profit.items():
+            out.append(f"   Gross gain of the round trip: {'+' if g > 0 else '-'}{amt(t, abs(g))} (before gas)")
+        for a, t, x, _ in r.payees:
+            out.append(f"   Gain goes to {short(a)}: {amt(t, x)}")
+    elif r.verdict in ("liquidity_add", "liquidity_remove", "liquidity_rebalance", "fee_collect"):
+        what = {"liquidity_add": "added", "liquidity_remove": "removed", "liquidity_rebalance": "moved (removed + added)",
+                "fee_collect": "collected (fees / tokens)"}[r.verdict]
+        out.append(f"Liquidity {what} by: " + ", ".join(short(a) for a in r.traders) + "   in pool(s): " +
+                   ", ".join(f"{short(a)} [{'+'.join(sorted(r.lp_pools.get(a, [])))}]" for a in r.venues))
+    elif r.verdict in ("transfer", "mint", "burn"):
+        out.append("From: " + ", ".join(short(a) for a in r.traders) + "   To: " + ", ".join(short(a) for a in r.venues))
+
+    if r.fills:
         out.append(f"Fills ({len(r.fills)}):")
         for i, f in enumerate(r.fills, 1):
             c = " + ".join(amt(t, x) for t, x in f["counter"].items())
-            out.append(f"   #{i} pool {short(f['pool'])}: {amt(rize, f['rize'])} <-> {c}")
-        # Pool-side flow, the way monitoring bots count it: RIZE into pools = sell side, RIZE out of pools = buy side
+            out.append(f"   #{i} pool {short(f['pool'])}: {amt(rize, f['rize'])} {'in' if f['dir'] > 0 else 'out'} <-> {c}")
         out.append(f"Pool-side flow ({r.swap_count} swap event(s) in the receipt):")
         for d, name in ((1, "SELL side (RIZE into pools)"), (-1, "BUY side  (RIZE out of pools)")):
             fs = [f for f in r.fills if f["dir"] == d]
@@ -313,19 +514,25 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a) -> list[str]:
                     cnt[t] = cnt.get(t, 0) + x
             line = f"   {name}: {fmt_amount(tot, 18, 18)} RIZE in {len(fs)} pool(s)"
             line += " against " + " + ".join(amt(t, x) for t, x in cnt.items()) if cnt else ""
-            st = [t for t in cnt if sym(t).upper() in STABLE_SYMBOLS]
-            if st and tot:
-                px = Decimal(cnt[st[0]]) / Decimal(10) ** meta.get(st[0], ("", 18))[1] / (Decimal(tot) / Decimal(10) ** 18)
-                line += f"  -> ${px:.8f} per RIZE"
+            st = [t for t in cnt if is_stable(t)]
+            if st:
+                px = usd_per_rize(cnt[st[0]], st[0], tot)
+                if px:
+                    line += f"  -> ${px:.8f} per RIZE"
             out.append(line)
-    elif r.verdict in ("liquidity_add", "liquidity_remove", "liquidity_rebalance", "fee_collect"):
-        what = {"liquidity_add": "added", "liquidity_remove": "removed", "liquidity_rebalance": "moved (removed + added)",
-                "fee_collect": "collected (fees / tokens)"}[r.verdict]
-        out.append(f"Liquidity {what} by: " + ", ".join(short(a) for a in r.traders) + "   in pool(s): " +
-                   ", ".join(f"{short(a)} [{'+'.join(sorted(r.lp_pools.get(a, [])))}]" for a in r.venues))
-    elif r.verdict in ("transfer", "mint", "burn"):
-        out.append("From: " + ", ".join(short(a) for a in r.traders) + "   To: " + ", ".join(short(a) for a in r.venues))
-    out.append(f"Raw transfers in the receipt ({len(r.transfers)}), in log order:")
-    for idx, t, f, to, x in r.transfers:
-        out.append(f"   log {idx:>3}: {short(f)} -> {short(to)}  {amt(t, x)}")
+    if r.lp_events:
+        out.append("Liquidity events decoded from the pools:")
+        for pool, idx, kind, a0, a1 in r.lp_events:
+            t = pool_tokens.get(pool)
+            if t and a0 is not None:
+                out.append(f"   log {idx:>3} {kind:<7} {short(pool)}: {amt(t[0], a0)} / {amt(t[1], a1)}")
+            else:
+                out.append(f"   log {idx:>3} {kind:<7} {short(pool)}: amounts {a0} / {a1} (token order unknown)")
+    if r.swaps and pool_tokens:
+        out.append("Swap events vs token movements (can trades be read from pool logs alone?):")
+        out += swap_check(r, pool_tokens, short)
+    if not brief:
+        out.append(f"Raw transfers in the receipt ({len(r.transfers)}), in log order:")
+        for idx, t, f, to, x in r.transfers:
+            out.append(f"   log {idx:>3}: {short(f)} -> {short(to)}  {amt(t, x)}")
     return out
