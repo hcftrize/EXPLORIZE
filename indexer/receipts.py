@@ -112,6 +112,7 @@ class Recon:
     native_in: int = 0                             # wrapped native created (Deposit events)
     native_out: int = 0                            # wrapped native unwrapped to native coin (Withdrawal events)
     tx_value: int = 0                              # native coin sent with the transaction
+    other_events: list = field(default_factory=list)  # (emitter, topic0, count, first topic1) not decoded here
 
 
 @dataclass
@@ -125,6 +126,7 @@ class Parsed:
     lp_events: list
     native_in: int
     native_out: int
+    other: dict = field(default_factory=dict)   # (emitting address, topic0) -> [count, first topic1]
 
 
 def parse_logs(receipt: dict, wrapped: str) -> Parsed:
@@ -135,6 +137,7 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
     swaps: list = []
     lp: dict[str, set[str]] = {}
     lp_events: list = []
+    other: dict = {}
     n_in = n_out = 0
 
     def add(a: str, token: str, delta: int) -> None:
@@ -184,11 +187,14 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
             lp.setdefault(token, set()).add("collect")
             a = (words[1], words[2]) if len(words) >= 3 else (None, None)
             lp_events.append((token, idx, "collect", *a))
+        else:                                                    # events we do not decode: kept so they can be identified
+            e = other.setdefault((token, t0), [0, topics[1] if len(topics) > 1 else ""])
+            e[0] += 1
     for a in list(nets):                         # drop zero nets: those addresses are relays
         nets[a] = {t: v for t, v in nets[a].items() if v != 0}
         if not nets[a]:
             del nets[a]
-    return Parsed(nets, transfers, pools, seen, swaps, lp, lp_events, n_in, n_out)
+    return Parsed(nets, transfers, pools, seen, swaps, lp, lp_events, n_in, n_out, other)
 
 
 def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0) -> Recon:
@@ -199,7 +205,8 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
     r = Recon(verdict="unknown", nets=nets, transfers=sorted(P.transfers), swap_pools=sorted(pools),
               swap_count=len(P.swaps), swaps=sorted(P.swaps, key=lambda x: x[1]), lp_pools=lp,
               lp_events=sorted(P.lp_events, key=lambda x: x[1]), native_in=P.native_in, native_out=P.native_out,
-              tx_value=tx_value)
+              tx_value=tx_value,
+              other_events=sorted((k[0], k[1], v[0], v[1]) for k, v in P.other.items()))
     rz = {a: n[rize] for a, n in nets.items() if n.get(rize)}              # parties with a net RIZE change
     others = lambda a: {t: v for t, v in nets.get(a, {}).items() if t != rize}  # noqa: E731
     moved = {a for a in P.seen if a != ZERO}
@@ -421,7 +428,7 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
 
     def role_of(a: str) -> str:
         return ("trader" if a in r.traders else "pool" if a in r.venues else "RIZE fee" if a in {x for x, _ in r.rize_fees}
-                else "second swap" if a in r.hops else "pool (Swap event)" if a in r.swap_pools
+                else "route swap" if a in r.hops else "pool (Swap event)" if a in r.swap_pools
                 else "proceeds" if a in {x[0] for x in r.payees} else "fee" if a in {x[0] for x in r.fees} else "other")
 
     out = [f"VERDICT: {r.verdict.upper()}" + (f"   ({r.note})" if r.note else "")]
@@ -460,12 +467,16 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
             out.append(f"   Paid by {short(a)} (not the buyer): {amt(t, x)} = {share:.1%} of the pool amount")
         for a in r.hops:
             n = r.nets[a]
-            out.append(f"   Second swap at {short(a)}: " + " / ".join(("+" if v > 0 else "-") + amt(t, abs(v)) for t, v in n.items()))
+            out.append(f"   Other swap in the route at {short(a)}: " + " / ".join(("+" if v > 0 else "-") + amt(t, abs(v)) for t, v in n.items()))
         if sold and r.native_out:
             out.append(f"   Wrapped native unwrapped: {fmt_amount(r.native_out, 18)} ETH-equivalent paid out as native coin "
                        "(the recipient is not visible in the logs)")
         if not sold and r.tx_value:
             out.append(f"   Paid with native coin: transaction value {fmt_amount(r.tx_value, 18)} ETH")
+        if not sold and r.tx_value and r.native_in and r.tx_value > r.native_in:
+            extra = r.tx_value - r.native_in
+            out.append(f"   Native coin not swapped: {fmt_amount(extra, 18)} ETH = {Decimal(extra) * 100 / Decimal(r.tx_value):.3f}% "
+                       "of the transaction value (a fee taken in native coin, or change returned)")
         if not sold and r.native_in and not r.tx_value:
             out.append(f"   Native coin wrapped in this transaction: {fmt_amount(r.native_in, 18)}")
         for a, t, x in r.fees:
@@ -502,7 +513,9 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
         for i, f in enumerate(r.fills, 1):
             c = " + ".join(amt(t, x) for t, x in f["counter"].items())
             out.append(f"   #{i} pool {short(f['pool'])}: {amt(rize, f['rize'])} {'in' if f['dir'] > 0 else 'out'} <-> {c}")
-        out.append(f"Pool-side flow ({r.swap_count} swap event(s) in the receipt):")
+        on_v = sum(1 for sw in r.swaps if sw[0] in set(r.venues))
+        out.append(f"Pool-side flow ({on_v} swap event(s) on these pools" + (
+            f", {r.swap_count - on_v} on other pools" if r.swap_count > on_v else "") + "):")
         for d, name in ((1, "SELL side (RIZE into pools)"), (-1, "BUY side  (RIZE out of pools)")):
             fs = [f for f in r.fills if f["dir"] == d]
             if not fs:
@@ -531,6 +544,12 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
     if r.swaps and pool_tokens:
         out.append("Swap events vs token movements (can trades be read from pool logs alone?):")
         out += swap_check(r, pool_tokens, short)
+    if r.other_events and (not brief or not r.swap_pools):
+        out.append("Other events in the receipt (not decoded; emitter, topic0 x count, first indexed value):")
+        for emitter, t0, n, t1 in r.other_events[:12]:
+            out.append(f"   {short(emitter)}  {t0}  x{n}  {t1[:18] + '…' if t1 else ''}")
+        if len(r.other_events) > 12:
+            out.append(f"   … and {len(r.other_events) - 12} more")
     if not brief:
         out.append(f"Raw transfers in the receipt ({len(r.transfers)}), in log order:")
         for idx, t, f, to, x in r.transfers:
