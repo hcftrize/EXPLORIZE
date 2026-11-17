@@ -22,6 +22,12 @@ on:
       txs:
         description: "trade-check: transaction hashes, comma separated (empty = the MetaMask sale of 2M RIZE)"
         default: ""
+      recent:
+        description: "trade-check: instead of hashes, the N most recent transactions of the chain (0 = use the hashes)"
+        default: "0"
+      min_rize:
+        description: "trade-check with recent: only transactions moving at least this many RIZE"
+        default: "0"
       top:
         description: "classify: how many of the busiest addresses to classify"
         default: "40"
@@ -44,6 +50,8 @@ jobs:
       CHAIN: ${{ inputs.chain }}
       TXS: ${{ inputs.txs }}
       TOP: ${{ inputs.top }}
+      RECENT: ${{ inputs.recent }}
+      MIN_RIZE: ${{ inputs.min_rize }}
       ADDRESSES: ${{ inputs.addresses }}
       FULL: ${{ inputs.full }}
     steps:
@@ -56,4 +64,4 @@ jobs:
       - run: |
           EXTRA=""
           if [ "$FULL" = "true" ]; then EXTRA="--full"; fi
-          python -u -m indexer.market_check "$MODE" --chain "$CHAIN" --txs "$TXS" --top "$TOP" --addresses "$ADDRESSES" $EXTRA
+          python -u -m indexer.market_check "$MODE" --chain "$CHAIN" --txs "$TXS" --top "$TOP" --addresses "$ADDRESSES" --recent "$RECENT" --min-rize "$MIN_RIZE" $EXTRA
