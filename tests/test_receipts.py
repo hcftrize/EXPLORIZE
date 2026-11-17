@@ -225,3 +225,77 @@ def test_fmt_amount_and_dec_string():
     word = (32).to_bytes(32, "big") + (4).to_bytes(32, "big") + b"USDC" + bytes(28)
     assert mc.dec_string(word) == "USDC"
     assert mc.dec_string(b"RIZE" + bytes(28)) == "RIZE"
+
+
+# ---------------------------------------------------------------- v2: swap count, pool-side flow, liquidity events
+from indexer.receipts import BURN_TOPICS, COLLECT_TOPIC, MINT_TOPICS  # noqa: E402
+
+
+def pool_event(rec_builder, pool, topic):
+    rec_builder.logs.append({"address": pool, "topics": [topic, t32(SELLER)], "data": "0x" + "00" * 32,
+                             "logIndex": hex(len(rec_builder.logs))})
+    return rec_builder
+
+
+def test_swap_events_are_counted_and_pool_side_flow_is_printed_to_the_wei():
+    rec, _, (rz_a, rz_b, us_a, us_b, fee) = metamask_sell()
+    r = reconcile(rec, RIZE, WETH, tx_from=SELLER)
+    assert r.swap_count == 2
+    assert {f["dir"] for f in r.fills} == {1}                         # both pools received RIZE: sell side
+    text = "\n".join(report(r, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}))
+    assert "Pool-side flow (2 swap event(s)" in text
+    assert "SELL side (RIZE into pools): 2000000 RIZE in 2 pool(s)" in text.replace(",", "")
+    assert "$0.00219" in text
+
+
+def test_mixed_transaction_shows_both_sides():
+    bot = "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+    r = R()
+    r.transfer(USDC, bot, POOL_A, 300 * U6)
+    r.transfer(RIZE, POOL_A, bot, 119_789 * E18)
+    r.swap(POOL_A)
+    r.transfer(RIZE, bot, POOL_B, 119_789 * E18)
+    r.transfer(USDC, POOL_B, bot, 295 * U6)
+    r.swap(POOL_B)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=bot)
+    assert x.verdict == "arbitrage" and x.swap_count == 2
+    text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}))
+    assert "SELL side" in text and "BUY side" in text
+
+
+def test_liquidity_add_detected_from_the_pool_mint_event():
+    r = R()
+    r.transfer(RIZE, SELLER, POOL_A, 1000 * E18)
+    r.transfer(USDC, SELLER, POOL_A, 2 * U6)
+    pool_event(r, POOL_A, sorted(MINT_TOPICS)[0])
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "liquidity_add" and x.traders == [SELLER] and x.venues == [POOL_A]
+
+
+def test_burn_then_collect_is_a_removal_and_collect_alone_is_a_fee_claim():
+    r = R()
+    r.transfer(RIZE, POOL_A, SELLER, 1000 * E18)
+    pool_event(r, POOL_A, sorted(BURN_TOPICS)[0])
+    pool_event(r, POOL_A, COLLECT_TOPIC)
+    assert reconcile(r.done(), RIZE, WETH, tx_from=SELLER).verdict == "liquidity_remove"
+    r = R()
+    r.transfer(RIZE, POOL_A, SELLER, 5 * E18)
+    pool_event(r, POOL_A, COLLECT_TOPIC)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "fee_collect" and x.traders == [SELLER]
+
+
+def test_burn_and_mint_together_is_a_rebalance():
+    r = R()
+    r.transfer(RIZE, POOL_A, SELLER, 1000 * E18)
+    pool_event(r, POOL_A, sorted(BURN_TOPICS)[0])
+    r.transfer(RIZE, SELLER, POOL_B, 400 * E18)
+    pool_event(r, POOL_B, sorted(MINT_TOPICS)[0])
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "liquidity_rebalance"
+
+
+def test_a_swap_with_a_collect_in_the_same_tx_stays_a_swap():
+    rec, *_ = metamask_sell()
+    rec["logs"].append({"address": POOL_A, "topics": [COLLECT_TOPIC, t32(SELLER)], "data": "0x" + "00" * 32, "logIndex": "0x63"})
+    assert reconcile(rec, RIZE, WETH, tx_from=SELLER).verdict == "sell"
