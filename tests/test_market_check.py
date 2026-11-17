@@ -135,3 +135,37 @@ def test_a_token_that_wears_the_rize_symbol_is_flagged_in_classify():
     lines = []
     mc.classify(Node(), load_chains()["base"], [(POOL_B, 1)], None, lines.append)
     assert "NOT OUR RIZE" in "\n".join(lines)
+
+
+def test_the_header_of_a_transaction_is_one_self_contained_line():
+    lines = []
+    mc.trade_check(FakeNode(), load_chains()["base"], [TX], None, lines.append, brief=True)
+    head = [l for l in lines if l.startswith("TX ")]
+    assert len(head) == 1 and "block 16" in head[0] and f"sender {SELLER}" in head[0] and "native value 0" in head[0]
+
+
+def test_undecoded_events_are_listed_so_a_new_pool_type_can_be_identified():
+    node = FakeNode()
+    manager = "0x" + "44" * 20
+    node.receipt["logs"].append({"address": manager, "topics": ["0x" + "ab" * 32, "0x" + "cd" * 32], "data": "0x" + "00" * 64,
+                                 "logIndex": "0x64"})
+    lines = []
+    mc.trade_check(node, load_chains()["base"], [TX], None, lines.append, brief=False)
+    text = "\n".join(lines)
+    assert "Other events in the receipt" in text and "ab" * 32 in text and "x1" in text
+
+
+def test_recent_transactions_come_from_the_database(conn):
+    import datetime as dt
+    with conn.cursor() as cur:
+        for i, (blk, tx, amt) in enumerate([(10, b"\x01" * 32, 5), (20, b"\x02" * 32, 5 * 10 ** 18 * 1000), (30, b"\x03" * 32, 7)]):
+            cur.execute("INSERT INTO transfers (chain_id, block_number, block_time, tx_hash, log_index, from_addr, to_addr, amount)"
+                        " VALUES (1, %s, %s, %s, %s, %s, %s, %s)",
+                        (blk, dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc), tx, i, b"\xaa" * 20, b"\xbb" * 20, amt))
+        cur.execute("INSERT INTO transfers (chain_id, block_number, block_time, tx_hash, log_index, from_addr, to_addr, amount)"
+                    " VALUES (1, 40, %s, %s, 0, %s, %s, 9)", (dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc), b"\x04" * 32,
+                                                              bytes(20), b"\xbb" * 20))          # a mint: skipped
+    conn.commit()
+    assert mc.recent_txs(conn, 1, 2) == ["0x" + "03" * 32, "0x" + "02" * 32]
+    assert mc.recent_txs(conn, 1, 5, min_rize=1000) == ["0x" + "02" * 32]
+    assert mc.recent_txs(conn, 8453, 5) == []
