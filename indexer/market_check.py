@@ -82,12 +82,24 @@ def load_labels(conn, addrs) -> dict[str, str]:
         return {}
 
 
-def is_contract(client, addrs) -> dict[str, bool]:
+def code_kinds(client, addrs) -> dict[str, str]:
+    """address -> "wallet" | "smart-wallet" | "contract".
+    A "smart-wallet" is an ordinary wallet that delegates to a smart-account code (EIP-7702: code is 0xef0100 + address);
+    it is the user's own wallet, not a contract that holds funds for others."""
     addrs = sorted(set(addrs))
     if not addrs:
         return {}
     codes = client.batch([("eth_getCode", [a, "latest"]) for a in addrs])
-    return {a: (c or "0x") not in ("0x", "0x0") for a, c in zip(addrs, codes)}
+    out = {}
+    for a, c in zip(addrs, codes):
+        c = (c or "0x").lower()
+        out[a] = ("wallet" if c in ("0x", "0x0") else
+                  "smart-wallet" if c.startswith("0xef0100") and len(c) == 48 else "contract")
+    return out
+
+
+def is_contract(client, addrs) -> dict[str, bool]:
+    return {a: k == "contract" for a, k in code_kinds(client, addrs).items()}
 
 
 # ------------------------------------------------------------------------------------------ trade-check
@@ -113,7 +125,7 @@ def trade_check(client, chain, txs, conn, log) -> bool:
         tokens = {t for _, t, *_ in r.transfers} | {t for n in r.nets.values() for t in n} | {rize}
         meta = read_token_meta(client, tokens, log)
         addrs = list(r.nets) + r.relays + r.swap_pools + [frm, to]
-        kinds = is_contract(client, [a for a in set(addrs) if a != ZERO][:40])
+        kinds = code_kinds(client, [a for a in set(addrs) if a != ZERO][:40])
         labels = load_labels(conn, [a for a in set(addrs) if a != ZERO])
         short_l = lambda a: (f"{labels[a]} ({short(a)})" if a in labels else short(a))  # noqa: E731
         for line in report(r, rize, meta, short=short_l):
@@ -125,7 +137,7 @@ def trade_check(client, chain, txs, conn, log) -> bool:
         for a in sorted(set(addrs) - {ZERO}):
             role = ("trader" if a in r.traders else "venue" if a in r.venues else "pool(Swap)" if a in r.swap_pools else
                     "relay" if a in r.relays else "sender" if a == frm else "")
-            log(f"    {a}  {'contract' if kinds.get(a) else 'wallet'}  {role}  {labels.get(a, '')}")
+            log(f"    {a}  {kinds.get(a, '?')}  {role}  {labels.get(a, '')}")
     return all_ok
 
 
