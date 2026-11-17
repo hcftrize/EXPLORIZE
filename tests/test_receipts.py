@@ -353,7 +353,7 @@ def test_proceeds_swapped_again_show_a_second_hop_and_native_payout():
     assert x.native_out == 492_653 * 10 ** 12 and x.counter_source == "pools"
     assert x.gross_counter == {USDC: usdc}
     text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6), WETH: ("WETH", 18)}))
-    assert "Second swap at" in text and "paid out as native coin" in text
+    assert "Other swap in the route at" in text and "paid out as native coin" in text
     assert "RIZE fee / skim" in text and "2.200% of the RIZE the seller handled" in text
 
 
