@@ -22,7 +22,7 @@ from decimal import Decimal
 
 from . import config
 from .multicall import SEL_BALANCE_OF, call_address, call_none, dec_address, dec_uint, multicall
-from .receipts import WRAPPED_NATIVE, ZERO, reconcile, report
+from .receipts import STABLES, WRAPPED_NATIVE, ZERO, reconcile, report
 from .rpc import RpcClient, RpcError
 
 DEFAULT_TX = "0xc66e28ce9a7ea945e829692196eb6271ff30ce2aaa167ced6a56cbc32782950c"
@@ -67,6 +67,21 @@ def read_token_meta(client, tokens, log) -> dict[str, tuple[str, int]]:
     return out
 
 
+def read_pool_tokens(client, pools) -> dict[str, tuple]:
+    """pool -> (token0, token1, factory or None). Pools are recognised by the answers, nothing is assumed."""
+    pools = sorted(set(pools))
+    calls = []
+    for a in pools:
+        calls += [(a, bytes.fromhex(SEL["token0"])), (a, bytes.fromhex(SEL["token1"])), (a, bytes.fromhex(SEL["factory"]))]
+    res = multicall(client, calls, group=120) if calls else []
+    out = {}
+    for i, a in enumerate(pools):
+        (o0, b0), (o1, b1), (of, bf) = res[3 * i:3 * i + 3]
+        if o0 and o1 and len(b0) >= 32 and len(b1) >= 32:
+            out[a] = (dec_address(b0), dec_address(b1), dec_address(bf) if of and len(bf) >= 32 else None)
+    return out
+
+
 def load_labels(conn, addrs) -> dict[str, str]:
     if conn is None or not addrs:
         return {}
@@ -103,9 +118,10 @@ def is_contract(client, addrs) -> dict[str, bool]:
 
 
 # ------------------------------------------------------------------------------------------ trade-check
-def trade_check(client, chain, txs, conn, log) -> bool:
+def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
     rize = chain.token
     wrapped = WRAPPED_NATIVE.get(chain.key, "")
+    stables = STABLES.get(chain.key, set())
     all_ok = True
     for tx in txs:
         log("=" * 78)
@@ -121,23 +137,35 @@ def trade_check(client, chain, txs, conn, log) -> bool:
         to = (info.get("to") or receipt.get("to") or "").lower()
         log(f"  block {int(receipt['blockNumber'], 16)}   status {'ok' if receipt.get('status') == '0x1' else 'FAILED'}"
             f"   sender {frm}   to {to}   native value {value / 1e18:g}")
-        r = reconcile(receipt, rize, wrapped, tx_from=frm)
-        tokens = {t for _, t, *_ in r.transfers} | {t for n in r.nets.values() for t in n} | {rize}
+        r = reconcile(receipt, rize, wrapped, tx_from=frm, tx_value=value)
+        pool_info = read_pool_tokens(client, set(r.swap_pools) | set(r.lp_pools))
+        tokens = ({t for _, t, *_ in r.transfers} | {t for n in r.nets.values() for t in n} | {rize}
+                  | {x for v in pool_info.values() for x in v[:2]})
         meta = read_token_meta(client, tokens, log)
         addrs = list(r.nets) + r.relays + r.swap_pools + [frm, to]
         kinds = code_kinds(client, [a for a in set(addrs) if a != ZERO][:40])
         labels = load_labels(conn, [a for a in set(addrs) if a != ZERO])
         short_l = lambda a: (f"{labels[a]} ({short(a)})" if a in labels else short(a))  # noqa: E731
-        for line in report(r, rize, meta, short=short_l):
+        pool_tokens = {a: (v[0], v[1]) for a, v in pool_info.items()}
+        for line in report(r, rize, meta, short=short_l, stables=stables, brief=brief, pool_tokens=pool_tokens):
             log("  " + line)
-        if value:
+        for t, (sy, _) in meta.items():                 # a token that wears our symbol but is not our token
+            if t != rize and sy.upper() == meta.get(rize, ("RIZE", 18))[0].upper():
+                log(f"  WARNING: token {t} is called {sy!r} like RIZE but is NOT RIZE")
+        if value and not brief:
             log(f"  Note: the transaction carried {value / 1e18:g} native coin; a trade paid or received in native "
                 "ETH leaves no token log for that leg.")
-        log("  Addresses (full), role and type:")
-        for a in sorted(set(addrs) - {ZERO}):
-            role = ("trader" if a in r.traders else "venue" if a in r.venues else "pool(Swap)" if a in r.swap_pools else
-                    "relay" if a in r.relays else "sender" if a == frm else "")
-            log(f"    {a}  {kinds.get(a, '?')}  {role}  {labels.get(a, '')}")
+        if pool_info:
+            log("  Pools in this transaction (read from the chain):")
+            for a, (t0, t1, fac) in sorted(pool_info.items()):
+                log(f"    {a}  {meta.get(t0, ('?',))[0]}/{meta.get(t1, ('?',))[0]}  factory {fac or '(none)'}"
+                    f"{'  ' + labels[a] if a in labels else ''}")
+        if not brief:
+            log("  Addresses (full), role and type:")
+            for a in sorted(set(addrs) - {ZERO}):
+                role = ("trader" if a in r.traders else "pool" if a in r.venues else "pool(Swap)" if a in r.swap_pools else
+                        "relay" if a in r.relays else "second swap" if a in r.hops else "sender" if a == frm else "")
+                log(f"    {a}  {kinds.get(a, '?')}  {role}  {labels.get(a, '')}")
     return all_ok
 
 
@@ -211,7 +239,10 @@ def classify(client, chain, addrs: list[tuple[str, int | None]], conn, log) -> b
         bal = rec["balance"]
         bal_s = f"{Decimal(bal) / Decimal(10) ** 18:,.0f} RIZE" if bal is not None else "?"
         if "token0" in rec:
-            sym = lambda t: meta.get(t, (t[:8], 18))[0]  # noqa: E731
+            def sym(t, _m=meta):
+                name = _m.get(t, (t[:8], 18))[0]
+                same = name.upper() == _m.get(rize, ("RIZE", 18))[0].upper()
+                return f"{name}[NOT OUR RIZE: {t[:10]}…]" if same and t != rize else name
             style = ("concentrated-liquidity pool (tickSpacing %s)" % rec["tick"] if "tick" in rec else
                      "constant-product style pool (getReserves)" if "reserves" in rec else "pool-like contract")
             extra = []
@@ -253,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--txs", default="", help="comma-separated transaction hashes (trade-check)")
     p.add_argument("--top", type=int, default=40, help="busiest addresses to classify (classify)")
     p.add_argument("--addresses", default="", help="comma-separated addresses to classify in addition")
+    p.add_argument("--full", action="store_true", help="trade-check: print the raw transfers and the address legend even for many transactions")
     args = p.parse_args(argv)
 
     def log(msg: str) -> None:
@@ -280,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
             if bad:
                 log(f"not a transaction hash: {bad[0]}")
                 return 2
-            ok = trade_check(client, chain, txs, conn, log)
+            ok = trade_check(client, chain, txs, conn, log, brief=(len(txs) > 3 and not args.full))
         else:
             extra = [a.strip().lower() for a in args.addresses.replace("\n", ",").split(",") if a.strip()]
             rows: list[tuple[str, int | None]] = []
