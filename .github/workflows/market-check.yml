@@ -28,6 +28,10 @@ on:
       addresses:
         description: "classify: extra addresses, comma separated (optional)"
         default: ""
+      full:
+        description: "trade-check: show raw transfers and address legend even with many transactions (long log)"
+        type: boolean
+        default: false
 
 jobs:
   market-check:
@@ -41,6 +45,7 @@ jobs:
       TXS: ${{ inputs.txs }}
       TOP: ${{ inputs.top }}
       ADDRESSES: ${{ inputs.addresses }}
+      FULL: ${{ inputs.full }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,4 +53,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -u -m indexer.market_check "$MODE" --chain "$CHAIN" --txs "$TXS" --top "$TOP" --addresses "$ADDRESSES"
+      - run: |
+          EXTRA=""
+          if [ "$FULL" = "true" ]; then EXTRA="--full"; fi
+          python -u -m indexer.market_check "$MODE" --chain "$CHAIN" --txs "$TXS" --top "$TOP" --addresses "$ADDRESSES" $EXTRA
