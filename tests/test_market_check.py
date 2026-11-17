@@ -98,3 +98,14 @@ def test_a_failed_receipt_lookup_is_reported_not_fatal():
     lines = []
     ok = mc.trade_check(node, load_chains()["base"], [TX], None, lines.append)
     assert ok is False and "receipt not found" in "\n".join(lines)
+
+
+def test_a_delegated_wallet_is_a_wallet_not_a_contract():
+    node = FakeNode()
+    node.codes[SELLER] = "0xef0100" + "ab" * 20                       # EIP-7702 delegation designator
+    kinds = mc.code_kinds(node, [SELLER, ROUTER, "0x" + "11" * 20])
+    assert kinds[SELLER] == "smart-wallet" and kinds[ROUTER] == "contract" and kinds["0x" + "11" * 20] == "wallet"
+    assert mc.is_contract(node, [SELLER])[SELLER] is False
+    lines = []
+    mc.trade_check(node, load_chains()["base"], [TX], None, lines.append)
+    assert f"{SELLER}  smart-wallet  trader" in "\n".join(lines)
