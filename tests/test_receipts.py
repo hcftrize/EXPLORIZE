@@ -103,7 +103,8 @@ def test_report_has_the_numbers_a_person_checks():
     meta = {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}
     text = "\n".join(report(r, RIZE, meta))
     assert "VERDICT: SELL" in text
-    assert "SOLD 2,000,000 RIZE for 4,344.247 USDC" in text
+    assert "SOLD 2,000,000 RIZE into 2 pool(s) for 4,382.595 USDC" in text      # pool side: what the pools exchanged
+    assert "Seller received 4,344.247 USDC" in text
     assert "$0.002172" in text                                          # what the seller got per RIZE
     assert "$0.002191" in text                                          # price at the pools, before the fee
     assert "0.875% of the pool amount" in text
@@ -299,3 +300,144 @@ def test_a_swap_with_a_collect_in_the_same_tx_stays_a_swap():
     rec, *_ = metamask_sell()
     rec["logs"].append({"address": POOL_A, "topics": [COLLECT_TOPIC, t32(SELLER)], "data": "0x" + "00" * 32, "logIndex": "0x63"})
     assert reconcile(rec, RIZE, WETH, tx_from=SELLER).verdict == "sell"
+
+
+# ------------------------------------------------- v3: roles seen on real transactions (aggregator routes of 2026-11)
+FEE1 = "0x51bfaeb0c43be6e2a17d7e8ee5ea0f3e52ea6097"     # contract skimming RIZE
+FEE2 = "0xc06ebbefd94032b85424d51906e2a335efae264b"     # wallet skimming RIZE
+HOP = "0xbb1b19f138db3925883a96ff7a304277460e0c99"      # a second pool: USDC in, WETH out
+X1 = "0x67d03631fe51b741c0c00c4e16eb662ac84381df"       # relay
+EXEC1 = "0x411d2c093e4c2e69bf0d8e94be1bf13dadd879c6"
+SELLER1 = "0x14950fc80ef73f3eee50b909cc222a2495c0fd42"
+MIX = "0xea5cb64754ad7aa24f7a6bbe3b724f29b4f822b8"
+
+
+def sell_with_skim_and_second_swap():
+    """386,907 RIZE handed over; 9,285.77 skimmed in RIZE by two addresses; 377,621.23 reach two pools; the USDC is then
+    swapped for WETH at a second pool and unwrapped: the seller is paid in native ETH (no log)."""
+    fee1, fee2 = 8_511_954_061 * 10 ** 12, 773_814_006 * 10 ** 12
+    a, b = 306_930_539_565 * 10 ** 12, 70_690_695_136 * 10 ** 12
+    gave = fee1 + fee2 + a + b                                          # 386,907.002768 (display rounding aside)
+    ua, ub = 781_779_008, 181_193_860
+    r = R()
+    r.transfer(RIZE, SELLER1, ROUTER, gave)
+    r.transfer(RIZE, ROUTER, FEE2, fee2)
+    r.transfer(RIZE, ROUTER, FEE1, fee1)
+    r.transfer(RIZE, ROUTER, EXEC1, a + b)
+    r.transfer(USDC, POOL_A, X1, ua)
+    r.transfer(RIZE, EXEC1, POOL_A, a)
+    r.swap(POOL_A)
+    r.transfer(USDC, POOL_B, X1, ub)
+    r.transfer(RIZE, EXEC1, POOL_B, b)
+    r.swap(POOL_B)
+    r.transfer(USDC, X1, HOP, ua + ub)
+    r.transfer(WETH, HOP, X1, 492_653 * 10 ** 12)
+    r.wrap(WITHDRAWAL_TOPIC0, X1, 492_653 * 10 ** 12)
+    return r.done(), (gave, fee1, fee2, a + b, ua + ub)
+
+
+def test_rize_skimmed_by_an_integrator_is_a_fee_not_a_trader():
+    rec, (gave, fee1, fee2, pools_rize, usdc) = sell_with_skim_and_second_swap()
+    x = reconcile(rec, RIZE, WETH, tx_from=SELLER1)
+    assert x.verdict == "sell"
+    assert x.traders == [SELLER1]                                       # only the one who gave RIZE
+    assert sorted(x.rize_fees) == sorted([(FEE1, fee1), (FEE2, fee2)])
+    assert x.trader_rize == -gave and x.pool_rize == pools_rize          # pool side is what a monitoring bot counts
+
+
+def test_proceeds_swapped_again_show_a_second_hop_and_native_payout():
+    rec, (_, _, _, _, usdc) = sell_with_skim_and_second_swap()
+    x = reconcile(rec, RIZE, WETH, tx_from=SELLER1)
+    assert x.hops == [HOP]                                              # not a "fee recipient taking 100%"
+    assert x.fees == [] and x.payees == []
+    assert x.native_out == 492_653 * 10 ** 12 and x.counter_source == "pools"
+    assert x.gross_counter == {USDC: usdc}
+    text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6), WETH: ("WETH", 18)}))
+    assert "Second swap at" in text and "paid out as native coin" in text
+    assert "RIZE fee / skim" in text and "2.200% of the RIZE the seller handled" in text
+
+
+def test_proceeds_sent_to_another_contract_are_reported_as_such():
+    other = "0x40ffe85a28dc9993541449464d7529a922142960"
+    r = R()
+    r.transfer(RIZE, SELLER, ROUTER, 300 * E18)
+    r.transfer(RIZE, ROUTER, POOL_A, 293 * E18)
+    r.transfer(RIZE, ROUTER, FEE1, 7 * E18)
+    r.transfer(USDC, POOL_A, ROUTER, 738 * U6)
+    r.swap(POOL_A)
+    r.transfer(USDC, ROUTER, other, 738 * U6)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "sell" and x.traders == [SELLER]
+    assert [(a, t, v) for a, t, v, _ in x.payees] == [(other, USDC, 738 * U6)]
+    assert x.fees == []                                                 # not a "fee" of 100%
+    assert x.counter_source == "pools"
+    assert "Proceeds delivered to" in "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}))
+
+
+def test_round_trip_between_two_pools_reports_buy_leg_sell_leg_and_gain():
+    bot = "0x239eef96928deac82769c9a769ec8c0b13567b30"
+    r = R()
+    r.transfer(RIZE, POOL_A, POOL_B, 119_789 * E18)                    # as in the real tx: RIZE goes pool to pool
+    r.transfer(USDC, POOL_B, bot, 295_902_848)
+    r.swap(POOL_B)
+    r.transfer(USDC, bot, POOL_A, 288_704_117)
+    r.swap(POOL_A)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=bot)
+    assert x.verdict == "arbitrage"
+    assert x.profit == {USDC: 295_902_848 - 288_704_117}                # 7.198731 USDC
+    assert x.payees and x.payees[0][0] == bot
+    text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}))
+    assert "ROUND TRIP" in text and "Gross gain of the round trip: +7.198731 USDC" in text
+
+
+def test_buy_paid_in_native_coin_shows_the_tx_value_and_a_small_rize_skim():
+    r = R()
+    r.wrap(DEPOSIT_TOPIC0, ROUTER, E18 // 10)
+    r.transfer(WETH, ROUTER, POOL_A, E18 // 10)
+    r.transfer(RIZE, POOL_A, ROUTER, 1000 * E18)
+    r.swap(POOL_A)
+    r.transfer(RIZE, ROUTER, SELLER, 985 * E18)
+    r.transfer(RIZE, ROUTER, FEE1, 15 * E18)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER, tx_value=E18 // 10)
+    assert x.verdict == "buy" and x.traders == [SELLER]
+    assert x.rize_fees == [(FEE1, 15 * E18)]
+    text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18), WETH: ("WETH", 18)}))
+    assert "Paid with native coin: transaction value 0.1 ETH" in text
+
+
+def test_prices_use_stable_addresses_not_symbols():
+    rec, _, _ = metamask_sell()
+    x = reconcile(rec, RIZE, WETH, tx_from=SELLER)
+    meta = {RIZE: ("RIZE", 18), USDC: ("USDC", 6)}
+    assert "per RIZE" in "\n".join(report(x, RIZE, meta, stables={USDC}))
+    assert "per RIZE" not in "\n".join(report(x, RIZE, meta, stables=set()))   # symbol says USDC, address not trusted
+
+
+def test_swap_events_are_decoded_and_match_the_pool_token_movements():
+    rec, *_ = metamask_sell()
+    # give the two Swap events real amounts: pool receives RIZE (token1) and pays USDC (token0), V3 signed layout
+    amounts = {POOL_A: (-3_203_458_000, 1_463_114 * E18), POOL_B: (-1_179_137_000, 536_886 * E18)}
+    for lg in rec["logs"]:
+        if lg["address"] in amounts and lg["topics"][0] == SWAP_V3:
+            a0, a1 = amounts[lg["address"]]
+            enc = lambda n: f"{n & ((1 << 256) - 1):064x}"  # noqa: E731
+            lg["data"] = "0x" + enc(a0) + enc(a1) + "00" * 96
+    x = reconcile(rec, RIZE, WETH, tx_from=SELLER)
+    assert [(p, a, b) for p, _, a, b in x.swaps] == [(POOL_A, -3_203_458_000, 1_463_114 * E18),
+                                                      (POOL_B, -1_179_137_000, 536_886 * E18)]
+    from indexer.receipts import swap_check
+    lines = swap_check(x, {POOL_A: (USDC, RIZE), POOL_B: (USDC, RIZE)})
+    assert all("MATCH" in l for l in lines) and len(lines) == 2
+    bad = swap_check(x, {POOL_A: (RIZE, USDC), POOL_B: (USDC, RIZE)})        # wrong token order is caught
+    assert "DIFFERENT" in bad[0]
+
+
+def test_liquidity_amounts_are_decoded_from_mint_and_burn_logs():
+    enc = lambda n: f"{n:064x}"  # noqa: E731
+    r = R()
+    r.transfer(RIZE, SELLER, POOL_A, 1000 * E18)
+    r.logs.append({"address": POOL_A, "topics": [sorted(MINT_TOPICS)[0] if False else "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde", t32(SELLER), t32(SELLER), t32(SELLER)],
+                   "data": "0x" + enc(0) + enc(5) + enc(2 * U6) + enc(1000 * E18), "logIndex": "0x7"})
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "liquidity_add"
+    assert x.lp_events == [(POOL_A, 7, "mint", 2 * U6, 1000 * E18)]
