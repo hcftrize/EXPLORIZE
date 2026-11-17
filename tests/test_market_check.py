@@ -71,10 +71,11 @@ def test_trade_check_prints_verdict_and_roles():
     text = "\n".join(lines)
     assert ok
     assert "VERDICT: SELL" in text
-    assert "SOLD 2,000,000 RIZE for 4,344.247 USDC" in text
+    assert "SOLD 2,000,000 RIZE into 2 pool(s) for 4,382.595 USDC" in text
     assert "Fills (2)" in text
     assert f"{SELLER}  wallet  trader" in text                      # full address, type and role in the legend
     assert f"{ROUTER}  contract  relay" in text
+    assert "Pools in this transaction" in text
 
 
 def test_classify_tells_pools_from_wallets_and_groups_by_factory():
@@ -109,3 +110,28 @@ def test_a_delegated_wallet_is_a_wallet_not_a_contract():
     lines = []
     mc.trade_check(node, load_chains()["base"], [TX], None, lines.append)
     assert f"{SELLER}  smart-wallet  trader" in "\n".join(lines)
+
+
+def test_brief_mode_skips_raw_transfers_and_shows_pool_checks():
+    lines = []
+    mc.trade_check(FakeNode(), load_chains()["base"], [TX], None, lines.append, brief=True)
+    text = "\n".join(lines)
+    assert "Raw transfers" not in text and "Addresses (full)" not in text
+    assert "Pools in this transaction (read from the chain)" in text and f"factory {FACTORY}" in text
+    assert "Pool-side flow (0 swap event(s)" not in text or "swap event" in text
+
+
+def test_a_token_that_wears_the_rize_symbol_is_flagged_in_classify():
+    fake = "0x" + "b7" * 20
+
+    class Node(FakeNode):
+        def answer(self, target, sel, cd):
+            if sel == mc.SEL["token1"] and target == POOL_B:
+                return (True, word(int(fake, 16)))
+            if sel == mc.SEL["symbol"] and target == fake:
+                return (True, abi_string("RIZE"))
+            return super().answer(target, sel, cd)
+
+    lines = []
+    mc.classify(Node(), load_chains()["base"], [(POOL_B, 1)], None, lines.append)
+    assert "NOT OUR RIZE" in "\n".join(lines)
