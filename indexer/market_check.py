@@ -125,18 +125,18 @@ def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
     all_ok = True
     for tx in txs:
         log("=" * 78)
-        log(f"TX {tx}  ({chain.name})")
         receipt = client.get_transaction_receipt(tx)
         if not receipt:
-            log("  receipt not found on this chain (wrong chain or hash?)")
+            log(f"TX {tx}  ({chain.name})\n  receipt not found on this chain (wrong chain or hash?)")
             all_ok = False
             continue
         info = client.call("eth_getTransactionByHash", [tx]) or {}
         value = int(info.get("value", "0x0"), 16)
         frm = (info.get("from") or receipt.get("from") or "").lower()
         to = (info.get("to") or receipt.get("to") or "").lower()
-        log(f"  block {int(receipt['blockNumber'], 16)}   status {'ok' if receipt.get('status') == '0x1' else 'FAILED'}"
-            f"   sender {frm}   to {to}   native value {value / 1e18:g}")
+        # one single line: block, status, sender, target and value stay attached to the hash
+        log(f"TX {tx}  ({chain.name}) block {int(receipt['blockNumber'], 16)} status "
+            f"{'ok' if receipt.get('status') == '0x1' else 'FAILED'} sender {frm} to {to} native value {value / 1e18:g}")
         r = reconcile(receipt, rize, wrapped, tx_from=frm, tx_value=value)
         pool_info = read_pool_tokens(client, set(r.swap_pools) | set(r.lp_pools))
         tokens = ({t for _, t, *_ in r.transfers} | {t for n in r.nets.values() for t in n} | {rize}
@@ -164,9 +164,21 @@ def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
             log("  Addresses (full), role and type:")
             for a in sorted(set(addrs) - {ZERO}):
                 role = ("trader" if a in r.traders else "pool" if a in r.venues else "pool(Swap)" if a in r.swap_pools else
-                        "relay" if a in r.relays else "second swap" if a in r.hops else "sender" if a == frm else "")
+                        "relay" if a in r.relays else "route swap" if a in r.hops else "sender" if a == frm else "")
                 log(f"    {a}  {kinds.get(a, '?')}  {role}  {labels.get(a, '')}")
     return all_ok
+
+
+def recent_txs(conn, chain_id: int, n: int, min_rize: int = 0) -> list[str]:
+    """The n most recent transaction hashes of the transfers table on one chain (optionally only moves >= min_rize)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT encode(tx_hash, 'hex'), max(block_number) b FROM transfers
+                        WHERE chain_id = %s AND amount >= %s AND from_addr <> %s AND to_addr <> %s
+                        GROUP BY tx_hash ORDER BY b DESC LIMIT %s""",
+                    (chain_id, min_rize * 10 ** 18, bytes(20), bytes(20), n))
+        rows = ["0x" + h for h, _ in cur.fetchall()]
+    conn.rollback()
+    return rows
 
 
 # -------------------------------------------------------------------------------------------- classify
@@ -282,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("mode", choices=["trade-check", "classify"])
     p.add_argument("--chain", default="base")
     p.add_argument("--txs", default="", help="comma-separated transaction hashes (trade-check)")
+    p.add_argument("--recent", type=int, default=0,
+                   help="trade-check: instead of --txs, take the N most recent transactions of this chain from the database")
+    p.add_argument("--min-rize", type=int, default=0, help="with --recent: only transactions moving at least this many RIZE")
     p.add_argument("--top", type=int, default=40, help="busiest addresses to classify (classify)")
     p.add_argument("--addresses", default="", help="comma-separated addresses to classify in addition")
     p.add_argument("--full", action="store_true", help="trade-check: print the raw transfers and the address legend even for many transactions")
@@ -307,7 +322,16 @@ def main(argv: list[str] | None = None) -> int:
         log(f"(database not available: {type(e).__name__}; labels and top addresses skipped)")
     try:
         if args.mode == "trade-check":
-            txs = [t.strip().lower() for t in args.txs.replace("\n", ",").split(",") if t.strip()] or [DEFAULT_TX]
+            txs = [t.strip().lower() for t in args.txs.replace("\n", ",").split(",") if t.strip()]
+            if args.recent:
+                if conn is None:
+                    log("--recent needs the database")
+                    return 2
+                txs = recent_txs(conn, chain.chain_id, args.recent, args.min_rize)
+                log(f"{len(txs)} most recent transactions on {chain.name} (from the database):")
+                for t in txs:
+                    log("  " + t)
+            txs = txs or [DEFAULT_TX]
             bad = [t for t in txs if not (t.startswith("0x") and len(t) == 66)]
             if bad:
                 log(f"not a transaction hash: {bad[0]}")
