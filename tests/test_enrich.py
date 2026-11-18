@@ -199,3 +199,31 @@ def test_the_names_the_site_reads_are_written_from_the_labels_files(conn):
     assert proxy == ("Proxy (EIP-1967 Beacon)", "proxy") and pool[1] == "pool"
     assert venue == ("Aerodrome Finance",) and tok == ("USDC", 18)
     enrich.sync_registry(conn, reg, load_chains())                          # again: nothing breaks
+
+
+def test_a_dust_trade_gets_no_absurd_price():
+    rz, usdc = 1, 99999999999378361648                     # one wei of RIZE against a hundred dollars
+    rec = (Rec().transfer(BSC_USDC, BUYER, ROUTER, usdc).transfer(BSC_USDC, ROUTER, VAULT, usdc)
+           .transfer(BSC_RIZE, VAULT, ROUTER, rz).transfer(BSC_RIZE, ROUTER, BUYER, rz)
+           .v4_swap(CLMANAGER, INFINITY_SWAP, ID_BSC, -usdc, rz, extra=(3299,)).done())
+    rec["blockNumber"] = hex(133405634)
+    t = enrich.build("bsc", REG, rec, info(BUYER, ROUTER)).trade
+    assert t["price_usd"] is None and "price-implausible" in t["flags"] and t["side"] == "buy"
+
+
+def test_a_row_the_database_refuses_goes_to_review_and_the_run_goes_on(conn):
+    good = enrich.Built(trade=None, liquidity=[], review={"reason": "guess", "verdict": "buy", "rize": 5, "detail": "x"})
+    tx_good, tx_bad = "0x" + "d1" * 32, "0x" + "d2" * 32
+    bad_trade = {"side": "buy", "trader": None, "sender": None, "router": None, "rize": 10 ** 90, "counter": {}, "usd": None,
+                 "price_usd": None, "fills": [], "swap_count": 0, "tags": [], "flags": [], "extra": {}}
+    items = [(tx_good, 100, dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc), good),
+             (tx_bad, 101, dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc), enrich.Built(trade=bad_trade, liquidity=[]))]
+    logs = []
+    out = enrich.safe_write(conn, 8453, items, logs.append)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM trades")
+        n_trades = cur.fetchone()[0]
+        cur.execute("SELECT encode(tx_hash,'hex'), reason FROM enrich_review ORDER BY block_number")
+        rows = cur.fetchall()
+    assert n_trades == 0 and rows == [(tx_good[2:], "guess"), (tx_bad[2:], "crash")]
+    assert out[1][3].review["reason"] == "crash" and any("refused" in l for l in logs)
