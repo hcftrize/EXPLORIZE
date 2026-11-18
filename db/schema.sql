@@ -111,11 +111,137 @@ CREATE TABLE IF NOT EXISTS holders_meta (
   duration_s        real
 );
 
+-- Market layer: derived from `transfers` + receipts + the registry, always rebuildable ------------------------
+
+-- RIZE trading pools. Mirror of labels/pools.json (the owner's file wins) plus the pools the code discovered
+-- itself ("POOL UNKNW n" until the owner names them). pool_key = pool address (20 bytes) or pool id (32 bytes).
+CREATE TABLE IF NOT EXISTS pools (
+  chain_id      integer NOT NULL,
+  pool_key      bytea   NOT NULL,
+  name          text    NOT NULL,
+  venue         text    NOT NULL DEFAULT '',
+  kind          text    NOT NULL,                 -- v3 | v2 | v4 | infinity | rfq
+  token0        bytea,
+  token1        bytea,
+  fee           integer,
+  tick_spacing  integer,
+  factory       bytea,
+  gauge         bytea,
+  manager       bytea,
+  holder        bytea,                            -- address that holds the tokens when it is not the key
+  status        text    NOT NULL DEFAULT 'active',
+  source        text    NOT NULL DEFAULT 'manual',
+  note          text,
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (chain_id, pool_key)
+);
+
+-- One row per transaction that is a trade (sell | buy | arbitrage), proven by Swap / fill events.
+CREATE TABLE IF NOT EXISTS trades (
+  chain_id     integer       NOT NULL,
+  tx_hash      bytea         NOT NULL,
+  block_number bigint        NOT NULL,
+  block_time   timestamptz   NOT NULL,
+  side         text          NOT NULL,            -- sell | buy | arbitrage
+  trader       bytea,
+  sender       bytea,                             -- who signed the transaction
+  router       bytea,                             -- what the transaction called
+  rize         numeric(78,0) NOT NULL,            -- RIZE on the pool side, exact (18 decimals, raw)
+  counter      jsonb         NOT NULL DEFAULT '{}',   -- {"<token hex>": "<raw>"}; the zero address = native coin
+  usd          numeric(24,6),                     -- dollars on the fills whose counter asset is a stablecoin
+  price_usd    numeric(30,12),                    -- usd / rize over those fills
+  fills        jsonb         NOT NULL DEFAULT '[]',   -- [{"pool","rize","counter","dir","usd"}]
+  swap_count   integer       NOT NULL DEFAULT 0,
+  tags         text[]        NOT NULL DEFAULT '{}',
+  flags        text[]        NOT NULL DEFAULT '{}',   -- worth a look: events and transfers disagree, unknown pool id...
+  extra        jsonb         NOT NULL DEFAULT '{}',   -- fees, profit, native legs, RIZE skimmed
+  PRIMARY KEY (chain_id, tx_hash)
+);
+CREATE INDEX IF NOT EXISTS trades_time_idx   ON trades (block_time DESC);
+CREATE INDEX IF NOT EXISTS trades_chain_time ON trades (chain_id, block_time DESC);
+CREATE INDEX IF NOT EXISTS trades_trader_idx ON trades (trader, block_time DESC);
+
+-- Liquidity moves: add | remove | collect, one row per pool event (singleton pools: per ModifyLiquidity).
+CREATE TABLE IF NOT EXISTS liquidity_events (
+  chain_id     integer       NOT NULL,
+  tx_hash      bytea         NOT NULL,
+  seq          integer       NOT NULL,
+  block_number bigint        NOT NULL,
+  block_time   timestamptz   NOT NULL,
+  pool_key     bytea         NOT NULL,
+  kind         text          NOT NULL,            -- add | remove | collect
+  provider     bytea,
+  rize         numeric(78,0),                     -- raw RIZE: + entered the pool, - left it (NULL = not readable)
+  counter      jsonb         NOT NULL DEFAULT '{}',
+  detail       jsonb         NOT NULL DEFAULT '{}',   -- ticks, salt, liquidity delta, tx verdict (rebalance...)
+  PRIMARY KEY (chain_id, tx_hash, seq)
+);
+CREATE INDEX IF NOT EXISTS liquidity_time_idx ON liquidity_events (block_time DESC);
+CREATE INDEX IF NOT EXISTS liquidity_pool_idx ON liquidity_events (chain_id, pool_key, block_time DESC);
+
+-- What each address pool holds, photographed by the snapshot command (one row per pool and hour).
+CREATE TABLE IF NOT EXISTS pool_snapshots (
+  chain_id      integer       NOT NULL,
+  pool_key      bytea         NOT NULL,
+  ts            timestamptz   NOT NULL,
+  block_number  bigint,
+  rize          numeric(78,0) NOT NULL,
+  counter_token bytea,
+  counter       numeric(78,0),
+  PRIMARY KEY (chain_id, pool_key, ts)
+);
+
+-- Where the enrichment of each chain stands.
+CREATE TABLE IF NOT EXISTS enrich_state (
+  chain_id    integer PRIMARY KEY,
+  last_block  bigint,
+  txs_done    bigint  NOT NULL DEFAULT 0,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Transactions the enrichment could not turn into a proven trade or liquidity move (guessed venue, crash, flag).
+CREATE TABLE IF NOT EXISTS enrich_review (
+  chain_id     integer     NOT NULL,
+  tx_hash      bytea       NOT NULL,
+  block_number bigint      NOT NULL,
+  reason       text        NOT NULL,              -- guess | crash | flag | unknown_pool
+  verdict      text,
+  rize         numeric(78,0),
+  detail       text,
+  seen_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (chain_id, tx_hash)
+);
+
+-- Burn transactions already looked up in the Chainlink CCIP API (so a burn with no CCIP message is not asked again every run).
+CREATE TABLE IF NOT EXISTS ccip_checked (
+  chain_id    integer     NOT NULL,
+  tx_hash     bytea       NOT NULL,
+  found       boolean     NOT NULL,
+  checked_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (chain_id, tx_hash)
+);
+
+-- Names the site shows, written from the labels folder by the enrich command.
+ALTER TABLE labels ADD COLUMN IF NOT EXISTS logo text;
+CREATE TABLE IF NOT EXISTS venues (
+  key   text PRIMARY KEY,
+  name  text NOT NULL,
+  kind  text NOT NULL DEFAULT 'dex',
+  logo  text
+);
+CREATE TABLE IF NOT EXISTS tokens (
+  chain_id  integer NOT NULL,
+  address   bytea   NOT NULL,                     -- the zero address = the chain's native coin
+  symbol    text    NOT NULL,
+  decimals  integer NOT NULL,
+  PRIMARY KEY (chain_id, address)
+);
+
 -- The site connects with a read-only role; give it the new tables (no-op if the role does not exist).
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'explorize_ro') THEN
-    GRANT SELECT ON bonds, holders, holders_meta TO explorize_ro;
+    GRANT SELECT ON bonds, holders, holders_meta, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_messages, ccip_checked, venues, tokens TO explorize_ro;
   END IF;
 END
 $$;
