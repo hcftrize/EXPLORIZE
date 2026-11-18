@@ -1,0 +1,65 @@
+{
+  "_readme": "One entry per trading venue. 'logo' is a file name inside assets/explorize/venues/ (the page shows it when the file exists). 'factories' maps a pool factory address to a venue slug, used only as a hint when a new pool is discovered.",
+  "venues": {
+    "aerodrome": {
+      "name": "Aerodrome Finance",
+      "kind": "dex",
+      "chain": "base",
+      "logo": "aerodrome.svg"
+    },
+    "aero": {
+      "name": "Aero",
+      "kind": "dex",
+      "chain": "base",
+      "logo": "aero.svg"
+    },
+    "uniswap-v4": {
+      "name": "Uniswap V4",
+      "kind": "dex",
+      "chain": "ethereum",
+      "logo": "uniswap.svg"
+    },
+    "pancake-infinity": {
+      "name": "PancakeSwap Infinity",
+      "kind": "dex",
+      "chain": "bsc",
+      "logo": "pancakeswap.svg"
+    },
+    "rfq-ethereum": {
+      "name": "RFQ market maker (Ethereum)",
+      "kind": "rfq",
+      "chain": "ethereum",
+      "logo": ""
+    }
+  },
+  "factories": {
+    "0x420dd381b31aef6683db6b902084cb0ffece40da": {
+      "venue": "aerodrome",
+      "note": "Aerodrome pool factory (V1 style)"
+    },
+    "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a": {
+      "venue": "aerodrome",
+      "note": "Aerodrome Slipstream (concentrated liquidity) factory"
+    },
+    "0x1f98431c8ad98523631ae4a59f267346ea31f984": {
+      "venue": "uniswap-v3",
+      "note": "Uniswap V3 factory"
+    },
+    "0xc0aee478e3658e2610c5f7a4a2e1777ce9e4f2ac": {
+      "venue": "sushiswap-v2",
+      "note": "SushiSwap V2 factory"
+    },
+    "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865": {
+      "venue": "pancakeswap-v3",
+      "note": "PancakeSwap V3 factory"
+    },
+    "0xca143ce32fe78f1f7019d7d551a6402fc5350c73": {
+      "venue": "pancakeswap-v2",
+      "note": "PancakeSwap V2 factory"
+    },
+    "0xbcfccbde45ce874adcb698cc183debcf17952812": {
+      "venue": "pancakeswap-v1",
+      "note": "PancakeSwap V1 factory"
+    }
+  }
+}
