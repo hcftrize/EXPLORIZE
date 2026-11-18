@@ -29,6 +29,17 @@ def put(conn, chain_id, tx, frm, to, amount, block=1):
     conn.commit()
 
 
+def indexed(conn, *ids):
+    """The chains the explorer indexes (a message to any other network can only have its burn checked)."""
+    reg = Registry.from_dir()
+    slug = {56: "bsc", 8453: "base", 1: "ethereum", 137: "polygon"}
+    with conn.cursor() as cur:
+        for i in ids:
+            cur.execute("INSERT INTO chain_state (chain_id, slug, token, start_block, last_block) VALUES (%s,%s,%s,1,1000) "
+                        "ON CONFLICT DO NOTHING", (i, slug[i], bytes.fromhex(reg.rize(slug[i])[2:])))
+    conn.commit()
+
+
 def test_parse_message_takes_the_rize_amount_and_both_hashes():
     reg = Registry.from_dir()
     row = ccip.parse_message(MESSAGE, {56: reg.rize("bsc"), 8453: reg.rize("base")})
@@ -40,6 +51,7 @@ def test_parse_message_takes_the_rize_amount_and_both_hashes():
 
 def test_a_burn_is_matched_with_its_message_and_its_mint(conn):
     zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
     put(conn, 56, SEND, WALLET, zero, AMOUNT, block=100)                 # the burn
     put(conn, 8453, RECEIPT, zero, WALLET, AMOUNT, block=200)            # the mint on the other chain
     chains = [load_chains()["bsc"], load_chains()["base"]]
@@ -62,6 +74,7 @@ def test_a_burn_is_matched_with_its_message_and_its_mint(conn):
 def test_a_burn_without_message_is_remembered_and_a_wrong_mint_is_flagged(conn):
     zero = "0x" + "00" * 20
     other = "0x" + "ab" * 32
+    indexed(conn, 56, 8453)
     put(conn, 56, other, WALLET, zero, 5 * 10 ** 18, block=50)
     put(conn, 56, SEND, WALLET, zero, AMOUNT, block=100)
     put(conn, 8453, RECEIPT, zero, WALLET, AMOUNT - 1, block=200)         # minted one wei less
@@ -100,3 +113,16 @@ def test_a_message_still_in_flight_is_asked_again_by_id(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT status FROM ccip_messages")
         assert cur.fetchone()[0] == "SUCCESS"
+
+
+def test_a_message_to_a_network_without_a_number_does_not_crash_and_is_burn_only(conn):
+    zero = "0x" + "00" * 20
+    other = dict(MESSAGE, destNetworkInfo={"chainId": "MainNet", "name": "some-other-mainnet"}, receiptTransactionHash=None)
+    row = ccip.parse_message(other, {56: Registry.from_dir().rize("bsc")})
+    assert row["dest_chain_id"] == 0 and row["raw"]["destNetworkInfo"]["name"] == "some-other-mainnet"
+    put(conn, 56, SEND, WALLET, zero, AMOUNT, block=100)
+    indexed(conn, 56)
+    reg = Registry.from_dir()
+    ccip.ccip_sync(conn, [load_chains()["bsc"]], reg, fetch=lambda url: {"data": [other]}, pause=0, log=lambda m: None)
+    rep = ccip.bridge_report(conn)
+    assert rep["messages"] == 1 and rep["burn_only_other_chain"] == 1 and rep["mismatch"] == 0
