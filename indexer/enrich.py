@@ -38,6 +38,10 @@ def hx(a: str) -> bytes:
     return bytes.fromhex(a[2:])
 
 
+MAX_PRICE = Decimal(10) ** 9      # dollars per RIZE; above this the ratio is dust, not a price (column is numeric(30,12))
+MAX_USD = Decimal(10) ** 15
+
+
 def key_bytes(k: str) -> bytes:
     return bytes.fromhex(k[2:])
 
@@ -119,6 +123,15 @@ def _trade_row(chain, reg, r: Recon, frm, to, value, meta, stables, rize) -> dic
         cand = sorted(r.traders, key=lambda a: -abs(r.nets.get(a, {}).get(rize, 0)))
         trader = cand[0] if cand else None
     priced = bool(usd_rize)
+    price = (usd_total / (Decimal(usd_rize) / Decimal(10) ** 18)) if priced and r.verdict != "arbitrage" else None
+    usd_val = usd_total if priced and r.verdict != "arbitrage" else None
+    odd = []
+    if price is not None and price >= MAX_PRICE:          # a few wei of RIZE against real dollars: no meaningful price
+        price = None
+        odd.append("price-implausible")
+    if usd_val is not None and usd_val >= MAX_USD:
+        usd_val = None
+        odd.append("usd-implausible")
     tags = []
     if r.verdict == "arbitrage":
         tags.append("arbitrage")
@@ -150,10 +163,9 @@ def _trade_row(chain, reg, r: Recon, frm, to, value, meta, stables, rize) -> dic
     if value:
         extra["tx_value"] = str(value)
     return {"side": r.verdict, "trader": trader, "sender": frm or None, "router": to or None, "rize": rize_amt,
-            "counter": counter, "usd": (usd_total if priced and r.verdict != "arbitrage" else None),
-            "price_usd": ((usd_total / (Decimal(usd_rize) / Decimal(10) ** 18)) if priced and r.verdict != "arbitrage" else None),
+            "counter": counter, "usd": usd_val, "price_usd": price,
             "fills": fills, "swap_count": r.swap_count + sum(f.get("events", 0) for f in r.fills),
-            "tags": tags, "flags": list(r.flags), "extra": extra}
+            "tags": tags, "flags": list(r.flags) + odd, "extra": extra}
 
 
 def _liquidity_rows(chain, reg, r: Recon, frm, rize) -> list[dict]:
@@ -306,6 +318,30 @@ def write_results(conn, chain_id: int, items: list[tuple[str, int, object, Built
     conn.commit()
 
 
+def safe_write(conn, chain_id: int, items, log=print):
+    """Write a batch; if the database refuses it, write the transactions one by one and send the refused ones to review."""
+    try:
+        write_results(conn, chain_id, items)
+        return items
+    except psycopg2.Error as e:
+        conn.rollback()
+        log(f"[chain {chain_id}] batch refused by the database ({type(e).__name__}); writing one transaction at a time")
+    out = []
+    for item in items:
+        h, block, ts, b = item
+        try:
+            write_results(conn, chain_id, [item])
+            out.append(item)
+        except psycopg2.Error as e:
+            conn.rollback()
+            msg = f"database refused this row: {type(e).__name__}: {str(e).splitlines()[0][:160]}"
+            log(f"[chain {chain_id}] {h}: {msg}")
+            fallback = (h, block, ts, Built(review={"reason": "crash", "verdict": None, "rize": 0, "detail": msg}))
+            write_results(conn, chain_id, [fallback])
+            out.append(fallback)
+    return out
+
+
 def get_enrich_state(conn, chain_id: int) -> tuple[int | None, int]:
     with conn.cursor() as cur:
         cur.execute("SELECT last_block, txs_done FROM enrich_state WHERE chain_id = %s", (chain_id,))
@@ -412,7 +448,7 @@ def enrich_chain(chain, client, conn, reg: Registry, *, max_seconds: float | Non
                 items.append((h, block, ts, b))
             if unknown:
                 register_unknowns(client, conn, chain, reg, sorted(set(unknown)), log)
-            write_results(conn, chain.chain_id, items)
+            items = safe_write(conn, chain.chain_id, items, log)
             done += len(items)
             trades += sum(1 for *_, b in items if b.trade)
             liqs += sum(len(b.liquidity) for *_, b in items)
