@@ -119,17 +119,32 @@ def is_contract(client, addrs) -> dict[str, bool]:
 
 # ------------------------------------------------------------------------------------------ trade-check
 def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
+    """One block of text per transaction, printed in one piece; a transaction that fails does not stop the others."""
+    all_ok = True
+    for tx in txs:
+        buf: list[str] = []
+        try:
+            ok = _trade_check_one(client, chain, tx, conn, buf.append, brief)
+        except Exception as e:  # noqa: BLE001 - diagnostic: say which transaction and why, then go on
+            import traceback
+            buf.append(f"  CRASHED on this transaction: {type(e).__name__}: {e}")
+            buf.append("  " + traceback.format_exc().strip().replace("\n", "\n  "))
+            ok = False
+        log("\n".join(buf))
+        all_ok = all_ok and ok
+    return all_ok
+
+
+def _trade_check_one(client, chain, tx, conn, log, brief: bool) -> bool:
     rize = chain.token
     wrapped = WRAPPED_NATIVE.get(chain.key, "")
     stables = STABLES.get(chain.key, set())
-    all_ok = True
-    for tx in txs:
+    if True:
         log("=" * 78)
         receipt = client.get_transaction_receipt(tx)
         if not receipt:
             log(f"TX {tx}  ({chain.name})\n  receipt not found on this chain (wrong chain or hash?)")
-            all_ok = False
-            continue
+            return False
         info = client.call("eth_getTransactionByHash", [tx]) or {}
         value = int(info.get("value", "0x0"), 16)
         frm = (info.get("from") or receipt.get("from") or "").lower()
@@ -166,7 +181,7 @@ def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
                 role = ("trader" if a in r.traders else "pool" if a in r.venues else "pool(Swap)" if a in r.swap_pools else
                         "relay" if a in r.relays else "route swap" if a in r.hops else "sender" if a == frm else "")
                 log(f"    {a}  {kinds.get(a, '?')}  {role}  {labels.get(a, '')}")
-    return all_ok
+    return True
 
 
 def recent_txs(conn, chain_id: int, n: int, min_rize: int = 0) -> list[str]:
