@@ -41,6 +41,7 @@ Repository secrets (**Settings > Secrets and variables > Actions**):
 | **Explorize backfill** | One-off full history of the 4 chains in parallel. Resumable: run it again if it stops. Needs an archive node (dRPC Pay As You Go). |
 | **Explorize sync** | Incremental update (default: all chains). Meant to be triggered hourly. |
 | **Explorize verify** | Supply integrity check and per-chain status. |
+| **Explorize market layer** | Turns the synced transfers into trades and liquidity moves (`enrich`), photographs the pools (`snapshot`), finds unlisted RIZE pools (`discover`) and reconciles the bridges with the Chainlink CCIP API (`ccip`). Resumable; run it as often as you like. Names and logos come from the `labels/` folder and `assets/explorize/`. |
 
 ## Run locally
 
