@@ -22,7 +22,9 @@ from decimal import Decimal
 
 from . import config
 from .multicall import SEL_BALANCE_OF, call_address, call_none, dec_address, dec_uint, multicall
-from .receipts import STABLES, WRAPPED_NATIVE, ZERO, reconcile, report
+from .receipts import ZERO, reconcile, report
+from .registry import NATIVE, Registry
+from .venues import decode_venues, refine
 from .rpc import RpcClient, RpcError
 
 DEFAULT_TX = "0xc66e28ce9a7ea945e829692196eb6271ff30ce2aaa167ced6a56cbc32782950c"
@@ -136,9 +138,11 @@ def trade_check(client, chain, txs, conn, log, brief: bool = False) -> bool:
 
 
 def _trade_check_one(client, chain, tx, conn, log, brief: bool) -> bool:
+    from . import enrich
+    reg = Registry.from_dir()
     rize = chain.token
-    wrapped = WRAPPED_NATIVE.get(chain.key, "")
-    stables = STABLES.get(chain.key, set())
+    wrapped = reg.wrapped(chain.key)
+    stables = reg.stables(chain.key)
     if True:
         log("=" * 78)
         receipt = client.get_transaction_receipt(tx)
@@ -152,18 +156,48 @@ def _trade_check_one(client, chain, tx, conn, log, brief: bool) -> bool:
         # one single line: block, status, sender, target and value stay attached to the hash
         log(f"TX {tx}  ({chain.name}) block {int(receipt['blockNumber'], 16)} status "
             f"{'ok' if receipt.get('status') == '0x1' else 'FAILED'} sender {frm} to {to} native value {value / 1e18:g}")
-        r = reconcile(receipt, rize, wrapped, tx_from=frm, tx_value=value)
+        vi = decode_venues(receipt, chain.key, reg)
+        r = reconcile(receipt, rize, wrapped, tx_from=frm, tx_value=value, venue_addrs=vi.venue_addrs, lp_extra=vi.lp_extra)
+        refine(r, vi, chain.key, reg, rize)
         pool_info = read_pool_tokens(client, set(r.swap_pools) | set(r.lp_pools))
         tokens = ({t for _, t, *_ in r.transfers} | {t for n in r.nets.values() for t in n} | {rize}
-                  | {x for v in pool_info.values() for x in v[:2]})
-        meta = read_token_meta(client, tokens, log)
+                  | {x for v in pool_info.values() for x in v[:2]}) - {NATIVE}
+        meta = {**read_token_meta(client, tokens, log), **reg.token_meta(chain.key)}
         addrs = list(r.nets) + r.relays + r.swap_pools + [frm, to]
         kinds = code_kinds(client, [a for a in set(addrs) if a != ZERO][:40])
         labels = load_labels(conn, [a for a in set(addrs) if a != ZERO])
+        for a in set(addrs):
+            if a != ZERO and a not in labels and reg.label(chain.key, a):
+                labels[a] = reg.label(chain.key, a)
         short_l = lambda a: (f"{labels[a]} ({short(a)})" if a in labels else short(a))  # noqa: E731
         pool_tokens = {a: (v[0], v[1]) for a, v in pool_info.items()}
         for line in report(r, rize, meta, short=short_l, stables=stables, brief=brief, pool_tokens=pool_tokens):
             log("  " + line)
+        log(f"  Evidence: {r.evidence}" + ("  (venues proven by Swap / fill events or the registry)" if r.evidence == "events"
+                                           else "  (venues GUESSED from the flows: this is not stored as a trade)"))
+        for holder, ev, net, ok in r.venue_checks:
+            log(f"  Venue check {short_l(holder)}: events say {ev}, token movements say {net} -> {'OK' if ok else 'DIFFERENT'}")
+        for f in r.flags:
+            log(f"  FLAG: {f}")
+        for lq in r.liquidity:
+            p = reg.pool(chain.key, lq["pool"])
+            amt = "" if lq.get("rize") is None else f", RIZE {lq['rize'] / 1e18:+,.6f}"
+            log(f"  Liquidity move: {lq['kind']} in {p.name if p else short(lq['pool'])} ticks {lq['tick_lower']}..{lq['tick_upper']} "
+                f"position {lq['salt']}{amt}")
+        built = enrich.build(chain.key, reg, receipt, info)
+        if built.trade:
+            t = built.trade
+            usd = f", ${t['usd']:,.6f} (${t['price_usd']:.8f} per RIZE)" if t["usd"] is not None else ", dollar value not computable without a guess"
+            log(f"  WOULD BE STORED: trade {t['side']} {t['rize'] / 1e18:,.6f} RIZE, {len(t['fills'])} fill(s){usd}, tags {t['tags']}")
+        elif built.liquidity:
+            log(f"  WOULD BE STORED: {len(built.liquidity)} liquidity row(s)")
+        elif built.review:
+            log(f"  WOULD GO TO REVIEW: {built.review['reason']} ({built.review['detail']})")
+        else:
+            log("  WOULD BE STORED: nothing (not a trade or a liquidity move; the raw transfers stay in the transfers table)")
+        for a in built.unknown_pools:
+            log(f"  NEW POOL candidate: {a} emits swap events and moved RIZE but is not in labels/pools.json "
+                "(the enrichment would register it as POOL UNKNW n)")
         for t, (sy, _) in meta.items():                 # a token that wears our symbol but is not our token
             if t != rize and sy.upper() == meta.get(rize, ("RIZE", 18))[0].upper():
                 log(f"  WARNING: token {t} is called {sy!r} like RIZE but is NOT RIZE")
