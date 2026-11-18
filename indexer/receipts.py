@@ -113,6 +113,10 @@ class Recon:
     native_out: int = 0                            # wrapped native unwrapped to native coin (Withdrawal events)
     tx_value: int = 0                              # native coin sent with the transaction
     other_events: list = field(default_factory=list)  # (emitter, topic0, count, first topic1, first data words)
+    evidence: str = "events"                       # events: venues proven by Swap / fill events or the registry | guess: venues guessed from flows
+    flags: list = field(default_factory=list)      # things worth a human look (an unexplained venue balance, a mismatch)
+    liquidity: list = field(default_factory=list)  # decoded liquidity moves of singleton pools (ModifyLiquidity)
+    venue_checks: list = field(default_factory=list)  # (holder, event total, net total, ok): events vs token movements
 
 
 @dataclass
@@ -197,11 +201,18 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
     return Parsed(nets, transfers, pools, seen, swaps, lp, lp_events, n_in, n_out, other)
 
 
-def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0) -> Recon:
+def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0,
+              venue_addrs=None, lp_extra=None) -> Recon:
+    """venue_addrs: addresses KNOWN to be venues in this transaction although they emit no classic Swap event
+    (a V4 PoolManager / Infinity Vault that swapped, an RFQ contract that filled); lp_extra: address -> {"mint",
+    "burn", "collect"} for liquidity moves of singleton pools. Both come from the registry decoders (venues.py)."""
     rize = rize.lower()
     wrapped = (wrapped or "").lower()
     P = parse_logs(receipt, wrapped)
-    nets, pools, lp = P.nets, P.pools, P.lp
+    nets, lp = P.nets, P.lp
+    pools = set(P.pools) | {a.lower() for a in (venue_addrs or ())}
+    for a, kinds in (lp_extra or {}).items():
+        lp.setdefault(a.lower(), set()).update(kinds)
     r = Recon(verdict="unknown", nets=nets, transfers=sorted(P.transfers), swap_pools=sorted(pools),
               swap_count=len(P.swaps), swaps=sorted(P.swaps, key=lambda x: x[1]), lp_pools=lp,
               lp_events=sorted(P.lp_events, key=lambda x: x[1]), native_in=P.native_in, native_out=P.native_out,
@@ -251,6 +262,7 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
             r.verdict = "sell" if sum_v > 0 else "buy"
     else:
         # no recognised Swap event: liquidity add/remove, or a swap through a venue we cannot see
+        r.evidence = "guess"
         frm = (tx_from or "").lower()
         same = [a for a in rz if a != ZERO and others(a) and all(_sign(v) == _sign(rz[a]) for v in others(a).values())]
         opp = [a for a in rz if a != ZERO and any(_sign(v) == -_sign(rz[a]) for v in others(a).values())]
