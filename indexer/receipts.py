@@ -112,7 +112,7 @@ class Recon:
     native_in: int = 0                             # wrapped native created (Deposit events)
     native_out: int = 0                            # wrapped native unwrapped to native coin (Withdrawal events)
     tx_value: int = 0                              # native coin sent with the transaction
-    other_events: list = field(default_factory=list)  # (emitter, topic0, count, first topic1) not decoded here
+    other_events: list = field(default_factory=list)  # (emitter, topic0, count, first topic1, first data words)
 
 
 @dataclass
@@ -188,7 +188,7 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
             a = (words[1], words[2]) if len(words) >= 3 else (None, None)
             lp_events.append((token, idx, "collect", *a))
         else:                                                    # events we do not decode: kept so they can be identified
-            e = other.setdefault((token, t0), [0, topics[1] if len(topics) > 1 else ""])
+            e = other.setdefault((token, t0), [0, topics[1] if len(topics) > 1 else "", words[:10]])
             e[0] += 1
     for a in list(nets):                         # drop zero nets: those addresses are relays
         nets[a] = {t: v for t, v in nets[a].items() if v != 0}
@@ -206,7 +206,7 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
               swap_count=len(P.swaps), swaps=sorted(P.swaps, key=lambda x: x[1]), lp_pools=lp,
               lp_events=sorted(P.lp_events, key=lambda x: x[1]), native_in=P.native_in, native_out=P.native_out,
               tx_value=tx_value,
-              other_events=sorted((k[0], k[1], v[0], v[1]) for k, v in P.other.items()))
+              other_events=sorted((k[0], k[1], v[0], v[1], v[2]) for k, v in P.other.items()))
     rz = {a: n[rize] for a, n in nets.items() if n.get(rize)}              # parties with a net RIZE change
     others = lambda a: {t: v for t, v in nets.get(a, {}).items() if t != rize}  # noqa: E731
     moved = {a for a in P.seen if a != ZERO}
@@ -257,6 +257,8 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
 
         def pick(group_neg: list, group_pos: list) -> tuple[list, str]:
             """Which side is the trader / provider? The sender's side, else the smaller side, else the paying side."""
+            if not group_neg or not group_pos:                   # only one side has an opposite-sign counterpart
+                return (group_neg or group_pos), "only side with a counter-asset"
             if frm in group_pos:
                 return group_pos, "sender's side"
             if frm in group_neg:
@@ -505,7 +507,13 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
                 "fee_collect": "collected (fees / tokens)"}[r.verdict]
         out.append(f"Liquidity {what} by: " + ", ".join(short(a) for a in r.traders) + "   in pool(s): " +
                    ", ".join(f"{short(a)} [{'+'.join(sorted(r.lp_pools.get(a, [])))}]" for a in r.venues))
-    elif r.verdict in ("transfer", "mint", "burn"):
+    elif r.verdict == "burn":
+        out.append(f"RIZE destroyed (sent to the zero address): {amt(rize, abs(r.trader_rize))} by "
+                   + ", ".join(short(a) for a in r.traders) + "   (typical of a cross-chain bridge send)")
+    elif r.verdict == "mint":
+        out.append(f"RIZE created (from the zero address): {amt(rize, abs(r.trader_rize))} for "
+                   + ", ".join(short(a) for a in r.traders) + "   (typical of a cross-chain bridge delivery)")
+    elif r.verdict == "transfer":
         out.append("From: " + ", ".join(short(a) for a in r.traders) + "   To: " + ", ".join(short(a) for a in r.venues))
 
     if r.fills:
@@ -545,9 +553,13 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
         out.append("Swap events vs token movements (can trades be read from pool logs alone?):")
         out += swap_check(r, pool_tokens, short)
     if r.other_events and (not brief or not r.swap_pools):
-        out.append("Other events in the receipt (not decoded; emitter, topic0 x count, first indexed value):")
-        for emitter, t0, n, t1 in r.other_events[:12]:
-            out.append(f"   {short(emitter)}  {t0}  x{n}  {t1[:18] + '…' if t1 else ''}")
+        out.append("Other events in the receipt (not decoded; emitter, topic0 x count, first indexed value, data words):")
+
+        def w(v: int) -> str:
+            sv = v - (1 << 256) if v >= (1 << 255) else v
+            return str(sv) if abs(sv) < 10 ** 30 else "0x…" + f"{v:x}"[-8:]
+        for emitter, t0, n, t1, words in r.other_events[:12]:
+            out.append(f"   {short(emitter)}  {t0}  x{n}  {t1[:18] + '…' if t1 else ''}  data[{', '.join(w(x) for x in words)}]")
         if len(r.other_events) > 12:
             out.append(f"   … and {len(r.other_events) - 12} more")
     if not brief:
