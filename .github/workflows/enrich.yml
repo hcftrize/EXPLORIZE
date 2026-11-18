@@ -1,0 +1,56 @@
+name: Explorize market layer
+
+# Turns the synced transfers into trades and liquidity moves (enrich), photographs the pools (snapshot), finds RIZE pools
+# that are not in labels/pools.json yet (discover) and reconciles the bridges with the Chainlink CCIP API (ccip).
+# Every command resumes where it stopped: run it as often as you like, it catches up by itself.
+# Not scheduled: start it by hand while the app is being finished; the cron comes later, with the sync.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "enrich, snapshot, discover or ccip"
+        type: choice
+        default: enrich
+        options:
+          - enrich
+          - snapshot
+          - discover
+          - ccip
+      chain:
+        description: "all, base, ethereum, bsc or polygon"
+        default: all
+      max_minutes:
+        description: "Stop cleanly after this many minutes (progress is saved)"
+        default: "25"
+      rebuild:
+        description: "enrich only: forget the stored trades of the chain and recompute them from the start"
+        type: boolean
+        default: false
+      limit:
+        description: "ccip only: burn transactions looked up per chain in this run"
+        default: "300"
+
+jobs:
+  market:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      COMMAND: ${{ inputs.command }}
+      CHAIN: ${{ inputs.chain }}
+      MAX_MINUTES: ${{ inputs.max_minutes }}
+      REBUILD: ${{ inputs.rebuild }}
+      LIMIT: ${{ inputs.limit }}
+      RPC_BATCH_SIZE: "10"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          EXTRA=""
+          if [ "$REBUILD" = "true" ]; then EXTRA="--rebuild"; fi
+          python -u -m indexer "$COMMAND" --chain "${CHAIN:-all}" --max-minutes "${MAX_MINUTES:-25}" --limit "${LIMIT:-300}" $EXTRA
