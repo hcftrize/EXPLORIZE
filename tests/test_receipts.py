@@ -441,3 +441,33 @@ def test_liquidity_amounts_are_decoded_from_mint_and_burn_logs():
     x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
     assert x.verdict == "liquidity_add"
     assert x.lp_events == [(POOL_A, 7, "mint", 2 * U6, 1000 * E18)]
+
+
+# ------------------------------------------------- v4: a swap through a vault where only one side shows a counter-asset
+def test_one_sided_counter_asset_does_not_crash_and_reads_as_a_buy():
+    vault = "0x238a35" + "00" * 17
+    r = R()
+    r.transfer(USDC, SELLER, "0x" + "99" * 20, 100 * U6)               # the payment goes to an address with no RIZE change
+    r.transfer(RIZE, vault, SELLER, 44_070 * E18)
+    x = reconcile(r.done(), RIZE, WETH, tx_from=SELLER)
+    assert x.verdict == "buy" and x.traders == [SELLER] and x.venues == [vault]
+
+
+def test_undecoded_events_keep_their_data_words_for_identification():
+    manager = "0x" + "a0" * 20
+    r = R()
+    r.transfer(RIZE, SELLER, POOL_A, 5 * E18)
+    r.logs.append({"address": manager, "topics": ["0x" + "04" * 32, "0x" + "46" * 32],
+                   "data": "0x" + f"{(-75 * U6) & ((1 << 256) - 1):064x}" + f"{34_507 * E18:064x}", "logIndex": "0x9"})
+    x = reconcile(r.done(), RIZE, WETH)
+    (emitter, t0, n, t1, words), = x.other_events
+    assert emitter == manager and n == 1 and words[1] == 34_507 * E18
+    text = "\n".join(report(x, RIZE, {RIZE: ("RIZE", 18)}))
+    assert "-75000000" in text and "34507000000000000000000" in text
+
+
+def test_burn_and_mint_are_described_as_bridge_moves():
+    b = reconcile(R().transfer(RIZE, SELLER, ZERO, 44_070 * E18).done(), RIZE, WETH)
+    assert "RIZE destroyed" in "\n".join(report(b, RIZE, {RIZE: ("RIZE", 18)}))
+    m = reconcile(R().transfer(RIZE, ZERO, SELLER, 44_070 * E18).done(), RIZE, WETH)
+    assert "RIZE created" in "\n".join(report(m, RIZE, {RIZE: ("RIZE", 18)}))
