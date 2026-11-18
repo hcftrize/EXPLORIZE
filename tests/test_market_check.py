@@ -140,7 +140,7 @@ def test_a_token_that_wears_the_rize_symbol_is_flagged_in_classify():
 def test_the_header_of_a_transaction_is_one_self_contained_line():
     lines = []
     mc.trade_check(FakeNode(), load_chains()["base"], [TX], None, lines.append, brief=True)
-    head = [l for l in lines if l.startswith("TX ")]
+    head = [l for l in "\n".join(lines).split("\n") if l.startswith("TX ")]
     assert len(head) == 1 and "block 16" in head[0] and f"sender {SELLER}" in head[0] and "native value 0" in head[0]
 
 
@@ -169,3 +169,16 @@ def test_recent_transactions_come_from_the_database(conn):
     assert mc.recent_txs(conn, 1, 2) == ["0x" + "03" * 32, "0x" + "02" * 32]
     assert mc.recent_txs(conn, 1, 5, min_rize=1000) == ["0x" + "02" * 32]
     assert mc.recent_txs(conn, 8453, 5) == []
+
+
+def test_a_crash_on_one_transaction_is_reported_and_the_next_one_is_still_checked():
+    class Node(FakeNode):
+        def get_transaction_receipt(self, tx):
+            if tx == "0x" + "ee" * 32:
+                raise ValueError("boom")
+            return super().get_transaction_receipt(tx)
+
+    lines = []
+    ok = mc.trade_check(Node(), load_chains()["base"], ["0x" + "ee" * 32, TX], None, lines.append, brief=True)
+    text = "\n".join(lines)
+    assert ok is False and "CRASHED on this transaction: ValueError: boom" in text and "VERDICT: SELL" in text
