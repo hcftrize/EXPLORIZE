@@ -70,10 +70,19 @@ def _hex(v: str | None) -> bytes | None:
     return bytes.fromhex(v[2:]) if v and v.startswith("0x") else None
 
 
+def _chain_id(info) -> int:
+    """EVM chains give a number ("8453"); other networks give a name ("MainNet"): those are stored as 0 (name kept in `raw`)."""
+    v = (info or {}).get("chainId")
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def parse_message(m: dict, rize_by_chain: dict[int, str]) -> dict:
     """One API message -> the row stored. The amount is the one of the RIZE token (a message may carry several)."""
-    src = int((m.get("sourceNetworkInfo") or {}).get("chainId") or 0)
-    dst = int((m.get("destNetworkInfo") or {}).get("chainId") or 0)
+    src = _chain_id(m.get("sourceNetworkInfo"))
+    dst = _chain_id(m.get("destNetworkInfo"))
     entries = []
     if isinstance(m.get("tokenAmounts"), list):
         entries = [(t.get("sourceTokenAddress") or t.get("tokenAddress"), t.get("amount") or t.get("tokenAmount"))
@@ -158,7 +167,11 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
             data = fetch(f"{API}/messages?{q}")
             msgs = (data or {}).get("data") or []
             for m in msgs:
-                save_message(conn, parse_message(m, rize_by_chain))
+                try:
+                    save_message(conn, parse_message(m, rize_by_chain))
+                except Exception as e:  # noqa: BLE001 - one odd message must not stop the run
+                    conn.rollback()
+                    log(f"[ccip] message {m.get('messageId')} skipped: {type(e).__name__}: {e}")
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO ccip_checked (chain_id, tx_hash, found) VALUES (%s,%s,%s) "
                             "ON CONFLICT (chain_id, tx_hash) DO UPDATE SET found = EXCLUDED.found, checked_at = now()",
@@ -186,14 +199,21 @@ def bridge_report(conn) -> dict:
         rows = cur.fetchall()
         cur.execute("""SELECT c.chain_id, count(*) FROM ccip_checked c WHERE NOT c.found GROUP BY c.chain_id""")
         no_msg = dict(cur.fetchall())
+        cur.execute("SELECT chain_id FROM chain_state")
+        indexed = {r[0] for r in cur.fetchall()}
     conn.rollback()
-    matched = pending = mismatch = 0
-    for _, status, _, _, _, dest_tx, amount, burned, minted in rows:
-        if status == "SUCCESS" and dest_tx and burned == minted and burned > 0:
+    matched = pending = mismatch = outside = 0
+    for _, status, src, dst, _, dest_tx, amount, burned, minted in rows:
+        if status == "SUCCESS" and dst not in indexed:                 # destination is a chain we do not index: burn side only
+            if amount is not None and burned == amount and burned > 0:
+                outside += 1
+            else:
+                mismatch += 1
+        elif status == "SUCCESS" and dest_tx and burned == minted and burned > 0:
             matched += 1
         elif status == "SUCCESS":
             mismatch += 1
         else:
             pending += 1
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
-            "burns_without_message": no_msg}
+            "burn_only_other_chain": outside, "burns_without_message": no_msg}
