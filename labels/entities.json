@@ -1,0 +1,125 @@
+{
+  "_readme": "Address labels. chain = 'all' or a chain slug (base, ethereum, bsc, polygon). category: dex | aggregator | bridge | proxy | liquidity-manager | account-abstraction | cex | team | wallet | system | other. logo = file name in assets/explorize/entities/ (or venues/). Add as many lines as you like; this file is the one you maintain.",
+  "entities": [
+    {
+      "address": "0x0000000000000000000000000000000000000000",
+      "chain": "all",
+      "label": "Zero address (mint / burn)",
+      "category": "system",
+      "source": "seed",
+      "logo": ""
+    },
+    {
+      "address": "0x284c507b2d8563660acbe4288963f940c98d7ede",
+      "chain": "base",
+      "label": "Proxy (EIP-1967 Beacon)",
+      "category": "proxy",
+      "source": "Arkham",
+      "logo": ""
+    },
+    {
+      "address": "0x121fd4ccc615ef36305a9ccc3f0ff6611a5e7759",
+      "chain": "base",
+      "label": "PoolManager (Proxy)",
+      "category": "proxy",
+      "source": "Arkham",
+      "logo": ""
+    },
+    {
+      "address": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
+      "chain": "all",
+      "label": "KyberSwap Meta Aggregation Router",
+      "category": "aggregator",
+      "source": "seed",
+      "logo": ""
+    },
+    {
+      "address": "0x8f10b468b06c6fd214b65f87778827f7d113f996",
+      "chain": "ethereum",
+      "label": "KyberSwap executor",
+      "category": "aggregator",
+      "source": "earlier notes, to confirm",
+      "logo": ""
+    },
+    {
+      "address": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+      "chain": "all",
+      "label": "ERC-4337 EntryPoint v0.7",
+      "category": "account-abstraction",
+      "source": "seed",
+      "logo": ""
+    },
+    {
+      "address": "0x000000000004444c5dc75cb358380d2e3de08a90",
+      "chain": "ethereum",
+      "label": "Uniswap V4 PoolManager",
+      "category": "dex",
+      "source": "seed",
+      "logo": "uniswap.svg"
+    },
+    {
+      "address": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+      "chain": "ethereum",
+      "label": "Uniswap V4 Position Manager",
+      "category": "dex",
+      "source": "seen in LP transactions",
+      "logo": "uniswap.svg"
+    },
+    {
+      "address": "0xa0ffb9c1ce1fe56963b0321b32e7a0302114058b",
+      "chain": "bsc",
+      "label": "PancakeSwap Infinity CLPoolManager",
+      "category": "dex",
+      "source": "seed, confirm with --full",
+      "logo": "pancakeswap.svg"
+    },
+    {
+      "address": "0x238a358808379702088667322f80ac48bad5e6c4",
+      "chain": "bsc",
+      "label": "PancakeSwap Infinity Vault",
+      "category": "dex",
+      "source": "seen in transfers",
+      "logo": "pancakeswap.svg"
+    },
+    {
+      "address": "0x34b03cb9086d7d758ac55af71584f81a598759fe",
+      "chain": "bsc",
+      "label": "Chainlink CCIP Router (BNB Chain)",
+      "category": "bridge",
+      "source": "seen in burns",
+      "logo": "chainlink.svg"
+    },
+    {
+      "address": "0x84a0797b31ac0d3e1d06157663dd4b18cffda188",
+      "chain": "bsc",
+      "label": "Chainlink CCIP OnRamp (BNB Chain)",
+      "category": "bridge",
+      "source": "seen in burns",
+      "logo": "chainlink.svg"
+    },
+    {
+      "address": "0xf234609b2e2704b48745a819c89774fe21e4a722",
+      "chain": "bsc",
+      "label": "RIZE CCIP token pool (BNB Chain)",
+      "category": "bridge",
+      "source": "seen in burns",
+      "logo": "chainlink.svg"
+    },
+    {
+      "address": "0x2837e93b4c6f5b1c62dabcdd12671b6ba551ef82",
+      "chain": "all",
+      "label": "Arrakis (sender)",
+      "category": "liquidity-manager",
+      "source": "seen in LP transactions",
+      "logo": "arrakis.svg"
+    },
+    {
+      "address": "0x2e6e879648293e939aa68ba4c6c129a1be733bda",
+      "chain": "all",
+      "label": "Arrakis (executor)",
+      "category": "liquidity-manager",
+      "source": "seen in LP transactions",
+      "logo": "arrakis.svg"
+    }
+  ]
+}
