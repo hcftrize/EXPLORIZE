@@ -33,7 +33,7 @@ on:
 jobs:
   market:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 340
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
