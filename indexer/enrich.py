@@ -441,8 +441,15 @@ def repair_traders(chain, client, conn, reg: Registry, *, max_seconds: float | N
         cur.execute("SELECT encode(tx_hash,'hex'), block_number, block_time FROM trades WHERE chain_id = %s AND trader = ANY(%s::bytea[]) "
                     "ORDER BY block_number", (chain.chain_id, [psycopg2.Binary(b) for b in bad]))
         rows = [("0x" + h, b, ts) for h, b, ts in cur.fetchall()]
+        # transactions that crashed earlier (a receipt the node did not return that day...) get another try
+        cur.execute("""SELECT encode(r.tx_hash,'hex'), r.block_number,
+                              (SELECT min(t.block_time) FROM transfers t WHERE t.chain_id = r.chain_id AND t.tx_hash = r.tx_hash)
+                         FROM enrich_review r WHERE r.chain_id = %s AND r.reason = 'crash' ORDER BY r.block_number""", (chain.chain_id,))
+        crashed = [("0x" + h, b, ts) for h, b, ts in cur.fetchall() if ts is not None]
     conn.rollback()
-    log(f"[{chain.key}] repair: {len(rows)} trades have a pool as their trader")
+    seen = {h for h, *_ in rows}
+    rows += [x for x in crashed if x[0] not in seen]
+    log(f"[{chain.key}] repair: {len(rows) - len(crashed)} trades have a pool as their trader, {len(crashed)} crashed transactions to retry")
     fixed = 0
     for i in range(0, len(rows), RECEIPT_CHUNK):
         if max_seconds is not None and time.monotonic() - t0 > max_seconds:
