@@ -169,3 +169,50 @@ def test_a_message_from_canton_without_amount_is_checked_on_the_mint_side_only(c
     conn.commit()
     rep = ccip.bridge_report(conn)
     assert rep["one_side_only_other_network"] == 1 and rep["mismatch"] == 0
+
+
+def test_a_transaction_missing_from_our_transfers_is_a_data_gap_not_a_wrong_amount(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    s, d = "0x" + "66" * 32, "0x" + "77" * 32
+    put(conn, 8453, s, WALLET, zero, 3 * 10 ** 18, block=1)              # the burn is there, the mint transaction is not
+    _msg(conn, "0x" + "c1" * 32, 8453, 56, s, d, 3 * 10 ** 18)
+    rep = ccip.bridge_report(conn)
+    assert rep["not_in_transfers"] == 1 and rep["mismatch"] == 0 and rep["matched"] == 0
+    assert rep["reasons"] == {"not_in_transfers: dest": 1}
+
+
+def test_a_transaction_without_any_burn_or_mint_in_it_is_named_as_such(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    s, d = "0x" + "88" * 32, "0x" + "99" * 32
+    put(conn, 8453, s, WALLET, "0x" + "cd" * 20, 3 * 10 ** 18, block=1)  # a plain transfer, not a burn
+    put(conn, 56, d, zero, WALLET, 3 * 10 ** 18, block=2)
+    _msg(conn, "0x" + "c2" * 32, 8453, 56, s, d, 3 * 10 ** 18)
+    rep = ccip.bridge_report(conn)
+    assert rep["reasons"] == {"burn none": 1} and rep["mismatch"] == 1
+
+
+def test_a_message_from_a_network_without_amount_but_a_burn_side_is_named(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 8453)
+    s = "0x" + "ee" * 32
+    put(conn, 8453, s, WALLET, zero, 3 * 10 ** 18, block=1)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO ccip_messages (message_id, status, source_chain_id, dest_chain_id, source_tx, amount) "
+                    "VALUES (%s,'SUCCESS',8453,0,%s,NULL)", (bytes.fromhex("b2" * 32), bytes.fromhex(s[2:])))
+    conn.commit()
+    rep = ccip.bridge_report(conn)
+    assert rep["reasons"] == {"burn side without amount": 1}
+
+
+def test_the_report_describes_the_stored_messages(conn, capsys):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    s, d = "0x" + "12" * 32, "0x" + "34" * 32
+    put(conn, 8453, s, WALLET, zero, 3 * 10 ** 18, block=1)
+    put(conn, 56, d, zero, WALLET, 3 * 10 ** 18, block=2)
+    _msg(conn, "0x" + "c3" * 32, 8453, 56, s, d, 3 * 10 ** 18)
+    info = ccip.dataset_summary(conn)
+    assert info["messages"] == 1 and info["with_amount"] == 1 and info["recent"] == 1
+    assert "stored messages: 1" in capsys.readouterr().out
