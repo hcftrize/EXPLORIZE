@@ -130,6 +130,20 @@ def burns_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int]]:
     return rows
 
 
+def mints_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int]]:
+    """Mint transactions (RIZE created from the zero address), newest first, that no stored message accounts for and that were
+    not looked up yet: these are the deliveries from networks we do not index (Canton...)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT t.tx_hash, max(t.block_number) FROM transfers t
+                        WHERE t.chain_id = %s AND t.from_addr = %s
+                          AND NOT EXISTS (SELECT 1 FROM ccip_messages m WHERE m.dest_chain_id = t.chain_id AND m.dest_tx = t.tx_hash)
+                          AND NOT EXISTS (SELECT 1 FROM ccip_checked c WHERE c.chain_id = t.chain_id AND c.tx_hash = t.tx_hash)
+                        GROUP BY t.tx_hash ORDER BY max(t.block_number) DESC LIMIT %s""", (chain_id, bytes(20), limit))
+        rows = [(bytes(h), b) for h, b in cur.fetchall()]
+    conn.rollback()
+    return rows
+
+
 def open_messages(conn, limit: int) -> list[bytes]:
     with conn.cursor() as cur:
         cur.execute("SELECT message_id FROM ccip_messages WHERE status IS NULL OR status NOT IN ('SUCCESS','FAILED') "
@@ -143,7 +157,7 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
               pause: float = PAUSE, log=print) -> dict:
     t0 = time.monotonic()
     rize_by_chain = {c.chain_id: reg.rize(c.key) for c in chains}
-    stats = {"burns_checked": 0, "messages": 0, "no_message": 0, "refreshed": 0}
+    stats = {"burns_checked": 0, "mints_checked": 0, "messages": 0, "no_message": 0, "refreshed": 0}
 
     def out_of_time() -> bool:
         return max_seconds is not None and time.monotonic() - t0 > max_seconds
@@ -181,6 +195,30 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
             stats["messages"] += len(msgs)
             stats["no_message"] += 0 if msgs else 1
             time.sleep(pause)
+    for c in chains:                                              # deliveries nobody burned for on our chains (other networks)
+        for txh, block in mints_to_check(conn, c.chain_id, limit):
+            if out_of_time():
+                log(f"[ccip] time budget reached; the rest is resumed at the next run")
+                return stats
+            q = urllib.parse.urlencode({"q": "0x" + txh.hex(), "limit": 5})
+            data = fetch(f"{API}/messages?{q}")
+            msgs = [m for m in ((data or {}).get("data") or [])
+                    if (m.get("receiptTransactionHash") or "").lower() == "0x" + txh.hex()]
+            for m in msgs:
+                try:
+                    save_message(conn, parse_message(m, rize_by_chain))
+                except Exception as e:  # noqa: BLE001
+                    conn.rollback()
+                    log(f"[ccip] message {m.get('messageId')} skipped: {type(e).__name__}: {e}")
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO ccip_checked (chain_id, tx_hash, found) VALUES (%s,%s,%s) "
+                            "ON CONFLICT (chain_id, tx_hash) DO UPDATE SET found = EXCLUDED.found, checked_at = now()",
+                            (c.chain_id, psycopg2.Binary(txh), bool(msgs)))
+            conn.commit()
+            stats["mints_checked"] += 1
+            stats["messages"] += len(msgs)
+            stats["no_message"] += 0 if msgs else 1
+            time.sleep(pause)
     log(f"[ccip] {stats}")
     return stats
 
@@ -203,17 +241,32 @@ def bridge_report(conn) -> dict:
         indexed = {r[0] for r in cur.fetchall()}
     conn.rollback()
     matched = pending = mismatch = outside = 0
-    for _, status, src, dst, _, dest_tx, amount, burned, minted in rows:
-        if status == "SUCCESS" and dst not in indexed:                 # destination is a chain we do not index: burn side only
-            if amount is not None and burned == amount and burned > 0:
-                outside += 1
-            else:
-                mismatch += 1
-        elif status == "SUCCESS" and dest_tx and burned == minted and burned > 0:
-            matched += 1
-        elif status == "SUCCESS":
-            mismatch += 1
-        else:
+    samples = []
+    for mid, status, src, dst, stx, dtx, amount, burned, minted in rows:
+        if status != "SUCCESS":
             pending += 1
+            continue
+        if src in indexed and dst in indexed:
+            ok = bool(dtx) and burned == minted and burned > 0
+            side = "both"
+        elif src in indexed:                                       # delivered on a network we do not index: burn side only
+            ok = amount is not None and burned == amount and burned > 0
+            side = "burn only"
+        elif dst in indexed:                                       # sent from a network we do not index: mint side only
+            ok = amount is not None and minted == amount and minted > 0
+            side = "mint only"
+        else:
+            ok, side = False, "neither"
+        if ok:
+            if side == "both":
+                matched += 1
+            else:
+                outside += 1
+        else:
+            mismatch += 1
+            if len(samples) < 15:
+                samples.append(f"  mismatch {mid[:10]}…  {src}->{dst}  ({side})  ccip {amount}  burned {burned}  minted {minted}")
+    for line in samples:
+        print(line, flush=True)
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
-            "burn_only_other_chain": outside, "burns_without_message": no_msg}
+            "one_side_only_other_network": outside, "no_message_found": no_msg}
