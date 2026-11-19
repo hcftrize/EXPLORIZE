@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS ccip_messages (
   raw              jsonb
 );
 
+CREATE INDEX IF NOT EXISTS ccip_source_tx_idx ON ccip_messages (source_chain_id, source_tx);
+CREATE INDEX IF NOT EXISTS ccip_dest_tx_idx   ON ccip_messages (dest_chain_id, dest_tx);
+CREATE INDEX IF NOT EXISTS ccip_sent_idx      ON ccip_messages (sent_at DESC);
+
 -- Hourly USD price series (RIZE/USD), used for "USD at time of transaction".
 CREATE TABLE IF NOT EXISTS prices_hourly (
   ts       timestamptz PRIMARY KEY,
