@@ -242,7 +242,17 @@ def dataset_summary(conn, log=print) -> dict:
         cur.execute("""SELECT max(c) FROM (SELECT count(*) c FROM ccip_messages WHERE source_tx IS NOT NULL
                                             GROUP BY source_chain_id, source_tx) x""")
         biggest = cur.fetchone()[0]
+        cur.execute("SELECT chain_id, slug, start_block, last_block FROM chain_state ORDER BY chain_id")
+        states = cur.fetchall()
+        cover = []
+        for cid, slug, sb, lb in states:
+            cur.execute("SELECT (SELECT min(block_time) FROM transfers WHERE chain_id = %s), "
+                        "(SELECT max(block_time) FROM transfers WHERE chain_id = %s)", (cid, cid))
+            lo, hi = cur.fetchone()
+            cover.append((slug, sb, lb, lo, hi))
     conn.rollback()
+    for slug, sb, lb, lo, hi in cover:
+        log(f"    transfers on {slug}: blocks {sb} -> {lb}, times {lo} -> {hi}")
     log(f"--- stored messages: {n} ({with_amount} with a RIZE amount, {ok} SUCCESS), {txs} distinct send transactions, "
         f"at most {biggest} messages in one send transaction")
     log(f"    sent between {first} and {last}; in the last 8 days: {recent} ({recent_amount} with a RIZE amount)")
@@ -275,7 +285,8 @@ def bridge_report(conn) -> dict:
                  (SELECT sum(g.amount) FROM ccip_messages g WHERE g.dest_chain_id = m.dest_chain_id
                     AND g.dest_tx = m.dest_tx) AS dst_group,
                  (SELECT count(*) FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx) AS src_rows,
-                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx) AS dst_rows
+                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx) AS dst_rows,
+                 m.sent_at
             FROM ccip_messages m ORDER BY m.sent_at DESC NULLS LAST""", {"z": bytes(20)})
         rows = cur.fetchall()
         cur.execute("""SELECT c.chain_id, count(*) FROM ccip_checked c WHERE NOT c.found GROUP BY c.chain_id""")
@@ -287,18 +298,22 @@ def bridge_report(conn) -> dict:
     reasons: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
 
-    def flag(reason, mid, src, dst, stx, dtx, amount, burned, minted):
+    by_month: dict[str, dict[str, int]] = {}
+
+    def flag(reason, mid, src, dst, stx, dtx, amount, burned, minted, sent):
         reasons[reason] = reasons.get(reason, 0) + 1
+        month = sent.strftime("%Y-%m") if sent else "?"
+        by_month.setdefault(reason, {})[month] = by_month.setdefault(reason, {}).get(month, 0) + 1
         got = samples.setdefault(reason, [])
         if len(got) < 3:
-            got.append(f"  [{reason}] message 0x{mid}  {src}->{dst}  ccip {amount}  burned {burned}  minted {minted}\n"
+            got.append(f"  [{reason}] message 0x{mid}  {src}->{dst}  sent {sent}  ccip {amount}  burned {burned}  minted {minted}\n"
                        f"      send tx {('0x' + stx) if stx else None}\n      receive tx {('0x' + dtx) if dtx else None}")
 
-    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group, src_rows, dst_rows in rows:
+    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group, src_rows, dst_rows, sent in rows:
         if status != "SUCCESS":
             pending += 1
             continue
-        # each side we index: ok / "absent" (transaction not in our transfers) / "none" (no burn or mint in it) / "differs"
+        # each side we index: ok / "absent" (transaction not in our transfers) / "none" (no burn or mint in it) / "above" / "below"
         def side(rows_n, moved, group, indexed_side):
             if not indexed_side:
                 return None
@@ -306,24 +321,28 @@ def bridge_report(conn) -> dict:
                 return "absent"
             if moved == 0:
                 return "none"
-            return "ok" if (amount is None or moved == amount or moved == group) else "differs"
+            if amount is None or moved == amount or moved == group:
+                return "ok"
+            # more than every message we know of: the batch holds messages we have not stored (yet); less: a real shortfall
+            return "above" if moved > max(amount or 0, group or 0) else "below"
         s_state = side(src_rows, burned, src_group, src in indexed)
         d_state = side(dst_rows, minted, dst_group, dst in indexed)
-        bad = [(n, st) for n, st in (("burn", s_state), ("mint", d_state)) if st in ("none", "differs")]
+        bad = [(n, st) for n, st in (("burn", s_state), ("mint", d_state)) if st in ("none", "above", "below")]
         absent = [n for n, st in (("source", s_state), ("dest", d_state)) if st == "absent"]
         if bad:
-            flag(" + ".join(f"{n} {st}" for n, st in bad), mid, src, dst, stx, dtx, amount, burned, minted)
+            flag(" + ".join(f"{n} {st}" for n, st in bad), mid, src, dst, stx, dtx, amount, burned, minted, sent)
         elif absent:
-            flag("not_in_transfers: " + "+".join(absent), mid, src, dst, stx, dtx, amount, burned, minted)
+            flag("not_in_transfers: " + "+".join(absent), mid, src, dst, stx, dtx, amount, burned, minted, sent)
         elif s_state is None or d_state is None:
             if amount is None and s_state is not None:           # burn side only and the message has no amount: nothing to compare
-                flag("burn side without amount", mid, src, dst, stx, dtx, amount, burned, minted)
+                flag("burn side without amount", mid, src, dst, stx, dtx, amount, burned, minted, sent)
             else:
                 outside += 1
         else:
             matched += 1
     for reason, lines in samples.items():
-        print(f"--- {reasons[reason]} x {reason}", flush=True)
+        print(f"--- {reasons[reason]} x {reason}  (per month: "
+              + ", ".join(f"{m}: {n}" for m, n in sorted(by_month[reason].items())) + ")", flush=True)
         for line in lines:
             print(line, flush=True)
     mismatch = sum(n for r, n in reasons.items() if not r.startswith("not_in_transfers"))
