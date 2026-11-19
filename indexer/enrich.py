@@ -69,8 +69,9 @@ def build(chain: str, reg: Registry, receipt: dict, info: dict) -> Built:
     to = (info.get("to") or receipt.get("to") or "").lower()
     value = int(info.get("value", "0x0"), 16) if info.get("value") else 0
     vi = decode_venues(receipt, chain, reg)
+    pool_addrs = {p.key for p in reg.pools(chain) if not p.is_id}
     r = reconcile(receipt, rize, reg.wrapped(chain), tx_from=frm, tx_value=value,
-                  venue_addrs=vi.venue_addrs, lp_extra=vi.lp_extra)
+                  venue_addrs=vi.venue_addrs, lp_extra=vi.lp_extra, known_pools=pool_addrs)
     refine(r, vi, chain, reg, rize)
     out = Built()
     meta, stables = reg.token_meta(chain), reg.stables(chain)
@@ -120,7 +121,8 @@ def _trade_row(chain, reg, r: Recon, frm, to, value, meta, stables, rize) -> dic
         trader = frm
     else:
         rize_amt = abs(r.pool_rize)
-        cand = sorted(r.traders, key=lambda a: -abs(r.nets.get(a, {}).get(rize, 0)))
+        not_venues = [a for a in r.traders if reg.pool(chain, a) is None and a not in reg.holders(chain)]
+        cand = sorted(not_venues, key=lambda a: -abs(r.nets.get(a, {}).get(rize, 0)))
         trader = cand[0] if cand else None
     priced = bool(usd_rize)
     price = (usd_total / (Decimal(usd_rize) / Decimal(10) ** 18)) if priced and r.verdict != "arbitrage" else None
@@ -406,6 +408,51 @@ def discover(client, conn, chain, reg: Registry, top: int, log) -> list[Pool]:
 
 
 # ------------------------------------------------------------------------------------------ the job
+def process_txs(chain, client, conn, reg: Registry, part, log=print):
+    """Fetch the receipts of some transactions, turn each into rows and write them (idempotent). part = [(hash, block, time)]."""
+    calls = []
+    for h, *_ in part:
+        calls += [("eth_getTransactionReceipt", [h]), ("eth_getTransactionByHash", [h])]
+    res = client.batch(calls)
+    items, unknown = [], []
+    for n, (h, block, ts) in enumerate(part):
+        receipt, info = res[2 * n], res[2 * n + 1] or {}
+        if not receipt:
+            items.append((h, block, ts, Built(review={"reason": "crash", "verdict": None, "rize": 0,
+                                                      "detail": "receipt not found"})))
+            continue
+        try:
+            b = build(chain.key, reg, receipt, info)
+        except Exception as e:  # noqa: BLE001 - one bad transaction must not stop the run
+            b = Built(review={"reason": "crash", "verdict": None, "rize": 0, "detail": f"{type(e).__name__}: {e}"})
+        unknown += b.unknown_pools
+        items.append((h, block, ts, b))
+    if unknown:
+        register_unknowns(client, conn, chain, reg, sorted(set(unknown)), log)
+    return safe_write(conn, chain.chain_id, items, log)
+
+
+def repair_traders(chain, client, conn, reg: Registry, *, max_seconds: float | None = None, log=print) -> dict:
+    """Re-read only the stored trades whose "trader" is a pool or a venue holder (a mistake of the first version)."""
+    t0 = time.monotonic()
+    bad = {bytes.fromhex(p.key[2:]) for p in reg.pools(chain.key) if not p.is_id}
+    bad |= {bytes.fromhex(a[2:]) for a in reg.holders(chain.key)}
+    with conn.cursor() as cur:
+        cur.execute("SELECT encode(tx_hash,'hex'), block_number, block_time FROM trades WHERE chain_id = %s AND trader = ANY(%s::bytea[]) "
+                    "ORDER BY block_number", (chain.chain_id, [psycopg2.Binary(b) for b in bad]))
+        rows = [("0x" + h, b, ts) for h, b, ts in cur.fetchall()]
+    conn.rollback()
+    log(f"[{chain.key}] repair: {len(rows)} trades have a pool as their trader")
+    fixed = 0
+    for i in range(0, len(rows), RECEIPT_CHUNK):
+        if max_seconds is not None and time.monotonic() - t0 > max_seconds:
+            log(f"[{chain.key}] time budget reached; run the repair again to continue")
+            break
+        fixed += len(process_txs(chain, client, conn, reg, rows[i:i + RECEIPT_CHUNK], log))
+    log(f"[{chain.key}] repair done: {fixed} transactions re-read")
+    return {"fixed": fixed, "found": len(rows)}
+
+
 def enrich_chain(chain, client, conn, reg: Registry, *, max_seconds: float | None = None, log=print) -> dict:
     t0 = time.monotonic()
     start, synced = db.get_state(conn, chain.chain_id)
@@ -428,27 +475,7 @@ def enrich_chain(chain, client, conn, reg: Registry, *, max_seconds: float | Non
         hi = min(lo + window - 1, synced)
         txs = txs_in_window(conn, chain.chain_id, lo, hi, holders)
         for i in range(0, len(txs), RECEIPT_CHUNK):
-            part = txs[i:i + RECEIPT_CHUNK]
-            calls = []
-            for h, *_ in part:
-                calls += [("eth_getTransactionReceipt", [h]), ("eth_getTransactionByHash", [h])]
-            res = client.batch(calls)
-            items, unknown = [], []
-            for n, (h, block, ts) in enumerate(part):
-                receipt, info = res[2 * n], res[2 * n + 1] or {}
-                if not receipt:
-                    items.append((h, block, ts, Built(review={"reason": "crash", "verdict": None, "rize": 0,
-                                                              "detail": "receipt not found"})))
-                    continue
-                try:
-                    b = build(chain.key, reg, receipt, info)
-                except Exception as e:  # noqa: BLE001 - one bad transaction must not stop the run
-                    b = Built(review={"reason": "crash", "verdict": None, "rize": 0, "detail": f"{type(e).__name__}: {e}"})
-                unknown += b.unknown_pools
-                items.append((h, block, ts, b))
-            if unknown:
-                register_unknowns(client, conn, chain, reg, sorted(set(unknown)), log)
-            items = safe_write(conn, chain.chain_id, items, log)
+            items = process_txs(chain, client, conn, reg, txs[i:i + RECEIPT_CHUNK], log)
             done += len(items)
             trades += sum(1 for *_, b in items if b.trade)
             liqs += sum(len(b.liquidity) for *_, b in items)
@@ -492,3 +519,37 @@ def snapshot(chain, client, conn, reg: Registry, log=print) -> int:
     conn.commit()
     log(f"[{chain.key}] snapshot: {n} pools photographed at block {block}")
     return n
+
+
+# ------------------------------------------------------------------------------------------ report (read-only diagnosis)
+def report(conn, log=print) -> None:
+    """What is stored, how far each chain got, how big the database is, and what went to review. Writes nothing."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database())), pg_database_size(current_database())/1048576")
+        pretty, mb = cur.fetchone()
+        log(f"DATABASE SIZE: {pretty} ({int(mb)} MB). The enrichment stops by itself above {STORAGE_LIMIT_MB} MB.")
+        cur.execute("""SELECT relname, pg_size_pretty(pg_total_relation_size(c.oid)) FROM pg_class c
+                         JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r'
+                         ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 12""")
+        log("LARGEST TABLES (with their indexes): " + ", ".join(f"{a} {b}" for a, b in cur.fetchall()))
+        cur.execute("""SELECT cs.chain_id, cs.slug, cs.last_block, es.last_block, es.txs_done FROM chain_state cs
+                         LEFT JOIN enrich_state es USING (chain_id) ORDER BY cs.chain_id""")
+        for cid, slug, synced, enriched, n in cur.fetchall():
+            gap = (synced - enriched) if (synced is not None and enriched is not None) else None
+            log(f"PROGRESS {slug}: transfers synced to block {synced}, enrichment at block {enriched}"
+                + (f" ({gap:,} blocks behind)" if gap else " (up to date)" if gap == 0 else " (not started)"))
+        cur.execute("SELECT chain_id, side, count(*) FROM trades GROUP BY 1, 2 ORDER BY 1, 2")
+        log("TRADES: " + ", ".join(f"{c}/{s} {n:,}" for c, s, n in cur.fetchall()))
+        cur.execute("SELECT chain_id, kind, count(*) FROM liquidity_events GROUP BY 1, 2 ORDER BY 1, 2")
+        log("LIQUIDITY EVENTS: " + ", ".join(f"{c}/{k} {n:,}" for c, k, n in cur.fetchall()))
+        cur.execute("SELECT chain_id, reason, coalesce(verdict,'-'), count(*) FROM enrich_review GROUP BY 1,2,3 ORDER BY 4 DESC LIMIT 20")
+        log("TO REVIEW (chain / reason / verdict: count): " + "; ".join(f"{c}/{r}/{v}: {n:,}" for c, r, v, n in cur.fetchall()))
+        cur.execute("""SELECT chain_id, left(coalesce(detail,''), 90), count(*) FROM enrich_review
+                        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12""")
+        for c, d, n in cur.fetchall():
+            log(f"  review detail  chain {c}  {n:,} x  {d}")
+        cur.execute("""SELECT unnest(flags) f, count(*) FROM trades GROUP BY 1 ORDER BY 2 DESC LIMIT 10""")
+        log("TRADE FLAGS: " + ", ".join(f"{f} {n:,}" for f, n in cur.fetchall()))
+        cur.execute("""SELECT count(*) FROM trades t JOIN pools p ON p.chain_id = t.chain_id AND p.pool_key = t.trader""")
+        log(f"TRADES WHOSE TRADER IS A POOL (to repair): {cur.fetchone()[0]:,}")
+    conn.rollback()
