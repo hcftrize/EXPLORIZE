@@ -89,6 +89,7 @@ def test_a_burn_without_message_is_remembered_and_a_wrong_mint_is_flagged(conn):
     ccip.ccip_sync(conn, chains, reg, fetch=fetch, pause=0, log=lambda m: None)
     rep = ccip.bridge_report(conn)
     assert rep["mismatch"] == 1 and rep["matched"] == 0 and rep["no_message_found"] == {56: 1}
+    assert rep["reasons"] == {"mint below": 1}
     n = len(calls)
     ccip.ccip_sync(conn, chains, reg, fetch=fetch, pause=0, log=lambda m: None)
     assert len(calls) == n
@@ -155,7 +156,7 @@ def test_two_messages_executed_in_one_transaction_share_one_mint_and_are_not_fla
         cur.execute("UPDATE transfers SET amount = %s WHERE tx_hash = %s AND chain_id = 56", (96 * 10 ** 18, bytes.fromhex(mint[2:])))
     conn.commit()
     rep = ccip.bridge_report(conn)
-    assert rep["mismatch"] == 2
+    assert rep["mismatch"] == 2 and rep["reasons"] == {"mint above": 2}      # more minted than the messages we know of
 
 
 def test_a_message_from_canton_without_amount_is_checked_on_the_mint_side_only(conn):
