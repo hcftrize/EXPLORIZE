@@ -1,8 +1,8 @@
 {
-  "_readme": "One entry per trading venue. 'logo' is a file name inside assets/explorize/venues/ (the page shows it when the file exists). 'factories' maps a pool factory address to a venue slug, used only as a hint when a new pool is discovered.",
+  "_readme": "One entry per trading venue. 'name' is the SHORT name shown in the tables (Aerodrome, Uniswap...). 'logo' is a file name inside assets/explorize/venues/ (svg, png, jpg or webp: the page tries the other extensions too). 'factories' maps a pool factory address to a venue slug, used only as a hint when a new pool is discovered.",
   "venues": {
     "aerodrome": {
-      "name": "Aerodrome Finance",
+      "name": "Aerodrome",
       "kind": "dex",
       "chain": "base",
       "logo": "aerodrome.svg"
@@ -14,22 +14,22 @@
       "logo": "aero.svg"
     },
     "uniswap-v4": {
-      "name": "Uniswap V4",
+      "name": "Uniswap",
       "kind": "dex",
       "chain": "ethereum",
       "logo": "uniswap.svg"
     },
     "pancake-infinity": {
-      "name": "PancakeSwap Infinity",
+      "name": "PancakeSwap",
       "kind": "dex",
       "chain": "bsc",
       "logo": "pancakeswap.svg"
     },
-    "rfq-ethereum": {
-      "name": "RFQ market maker (Ethereum)",
-      "kind": "rfq",
+    "dodo": {
+      "name": "DODO",
+      "kind": "dex",
       "chain": "ethereum",
-      "logo": ""
+      "logo": "dodo.svg"
     }
   },
   "factories": {
