@@ -548,6 +548,10 @@ def report(conn, log=print) -> None:
                         GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12""")
         for c, d, n in cur.fetchall():
             log(f"  review detail  chain {c}  {n:,} x  {d}")
+        cur.execute("""SELECT chain_id, encode(tx_hash,'hex'), left(coalesce(detail,''), 200) FROM enrich_review
+                        WHERE reason = 'crash' ORDER BY seen_at DESC LIMIT 10""")
+        for c, h, d in cur.fetchall():
+            log(f"  CRASH chain {c}  tx 0x{h}  {d}")
         cur.execute("""SELECT unnest(flags) f, count(*) FROM trades GROUP BY 1 ORDER BY 2 DESC LIMIT 10""")
         log("TRADE FLAGS: " + ", ".join(f"{f} {n:,}" for f, n in cur.fetchall()))
         cur.execute("""SELECT count(*) FROM trades t JOIN pools p ON p.chain_id = t.chain_id AND p.pool_key = t.trader""")
