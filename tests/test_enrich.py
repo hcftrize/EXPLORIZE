@@ -197,7 +197,7 @@ def test_the_names_the_site_reads_are_written_from_the_labels_files(conn):
         cur.execute("SELECT symbol, decimals FROM tokens WHERE chain_id = 56 AND address = %s", (bytes.fromhex(BSC_USDC[2:]),))
         tok = cur.fetchone()
     assert proxy == ("Proxy (EIP-1967 Beacon)", "proxy") and pool[1] == "pool"
-    assert venue == ("Aerodrome Finance",) and tok == ("USDC", 18)
+    assert venue == ("Aerodrome",) and tok == ("USDC", 18)
     enrich.sync_registry(conn, reg, load_chains())                          # again: nothing breaks
 
 
@@ -227,3 +227,19 @@ def test_a_row_the_database_refuses_goes_to_review_and_the_run_goes_on(conn):
         rows = cur.fetchall()
     assert n_trades == 0 and rows == [(tx_good[2:], "guess"), (tx_bad[2:], "crash")]
     assert out[1][3].review["reason"] == "crash" and any("refused" in l for l in logs)
+
+
+def test_a_known_pool_that_only_received_rize_is_a_venue_never_the_trader():
+    pool_a = next(p for p in REG.pools("base") if p.name == "Aerodrome 3")          # RIZE/USDT, V2 style
+    pool_b = REG.pool("base", MAIN_POOL)
+    assert pool_b.name == "Aero 1"
+    rize, usdt = BASE_RIZE, "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+    seller = "0x" + "c1" * 20
+    rec = (Rec().transfer(rize, seller, pool_a.key, 60 * 10 ** 18).transfer(rize, seller, pool_b.key, 40 * 10 ** 18)
+           .transfer(usdt, pool_a.key, seller, 2_000_000)
+           .v2_swap(pool_a.key, 60 * 10 ** 18, 0, 0, 2_000_000).done())
+    rec["blockNumber"] = hex(1000)
+    b = enrich.build("base", REG, rec, info(seller, ROUTER))
+    t = b.trade
+    assert t is not None and t["side"] == "sell" and t["trader"] == seller
+    assert {f["pool"] for f in t["fills"]} == {pool_a.key, pool_b.key}
