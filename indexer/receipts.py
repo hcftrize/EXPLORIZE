@@ -202,15 +202,19 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
 
 
 def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0,
-              venue_addrs=None, lp_extra=None) -> Recon:
+              venue_addrs=None, lp_extra=None, known_pools=None) -> Recon:
     """venue_addrs: addresses KNOWN to be venues in this transaction although they emit no classic Swap event
     (a V4 PoolManager / Infinity Vault that swapped, an RFQ contract that filled); lp_extra: address -> {"mint",
-    "burn", "collect"} for liquidity moves of singleton pools. Both come from the registry decoders (venues.py)."""
+    "burn", "collect"} for liquidity moves of singleton pools. Both come from the registry decoders (venues.py).
+    known_pools: every pool address of the registry. When a transaction already swaps, a known pool whose RIZE balance
+    moved is part of the route (a venue), never the trader."""
     rize = rize.lower()
     wrapped = (wrapped or "").lower()
     P = parse_logs(receipt, wrapped)
     nets, lp = P.nets, P.lp
     pools = set(P.pools) | {a.lower() for a in (venue_addrs or ())}
+    if pools:
+        pools |= {a.lower() for a in (known_pools or ()) if nets.get(a.lower(), {}).get(rize)}
     for a, kinds in (lp_extra or {}).items():
         lp.setdefault(a.lower(), set()).update(kinds)
     r = Recon(verdict="unknown", nets=nets, transfers=sorted(P.transfers), swap_pools=sorted(pools),
