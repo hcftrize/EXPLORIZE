@@ -126,3 +126,46 @@ def test_a_message_to_a_network_without_a_number_does_not_crash_and_is_burn_only
     ccip.ccip_sync(conn, [load_chains()["bsc"]], reg, fetch=lambda url: {"data": [other]}, pause=0, log=lambda m: None)
     rep = ccip.bridge_report(conn)
     assert rep["messages"] == 1 and rep["one_side_only_other_network"] == 1 and rep["mismatch"] == 0
+
+
+def _msg(conn, mid, src, dst, stx, dtx, amount):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO ccip_messages (message_id, status, source_chain_id, dest_chain_id, source_tx, dest_tx, amount, sent_at)"
+                    " VALUES (%s,'SUCCESS',%s,%s,%s,%s,%s,now())",
+                    (bytes.fromhex(mid[2:]), src, dst, bytes.fromhex(stx[2:]) if stx else None,
+                     bytes.fromhex(dtx[2:]) if dtx else None, amount))
+    conn.commit()
+
+
+def test_two_messages_executed_in_one_transaction_share_one_mint_and_are_not_flagged(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    s1, s2, mint = "0x" + "11" * 32, "0x" + "22" * 32, "0x" + "33" * 32
+    put(conn, 8453, s1, WALLET, zero, 54 * 10 ** 18, block=1)
+    put(conn, 8453, s2, WALLET, zero, 41 * 10 ** 18, block=2)
+    put(conn, 56, mint, zero, WALLET, 95 * 10 ** 18, block=3)            # one mint for both messages
+    _msg(conn, "0x" + "a1" * 32, 8453, 56, s1, mint, 54 * 10 ** 18)
+    _msg(conn, "0x" + "a2" * 32, 8453, 56, s2, mint, 41 * 10 ** 18)
+    rep = ccip.bridge_report(conn)
+    assert rep["matched"] == 2 and rep["mismatch"] == 0
+    # a third message that was never found leaves the sum short: now the batch is flagged
+    put(conn, 56, "0x" + "44" * 32, zero, WALLET, 1, block=4)
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute("UPDATE transfers SET amount = %s WHERE tx_hash = %s AND chain_id = 56", (96 * 10 ** 18, bytes.fromhex(mint[2:])))
+    conn.commit()
+    rep = ccip.bridge_report(conn)
+    assert rep["mismatch"] == 2
+
+
+def test_a_message_from_canton_without_amount_is_checked_on_the_mint_side_only(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 8453)
+    mint = "0x" + "55" * 32
+    put(conn, 8453, mint, zero, WALLET, 7 * 10 ** 18, block=5)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO ccip_messages (message_id, status, source_chain_id, dest_chain_id, dest_tx, amount) "
+                    "VALUES (%s,'SUCCESS',0,8453,%s,NULL)", (bytes.fromhex("b1" * 32), bytes.fromhex(mint[2:])))
+    conn.commit()
+    rep = ccip.bridge_report(conn)
+    assert rep["one_side_only_other_network"] == 1 and rep["mismatch"] == 0
