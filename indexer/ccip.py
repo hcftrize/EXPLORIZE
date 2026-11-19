@@ -224,7 +224,11 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
 
 
 def bridge_report(conn) -> dict:
-    """Does every burn have its CCIP message and its mint? Reads only the database."""
+    """Does every burn have its CCIP message and its mint? Reads only the database.
+
+    One transaction can carry several messages (CCIP executes them in a batch): then the mint is the SUM of the
+    messages that share the transaction, so each side is compared with the message amount OR with that sum.
+    A network we do not index (Canton) can only be checked on the side we see, and its message may carry no amount."""
     with conn.cursor() as cur:
         cur.execute("""
           SELECT encode(m.message_id,'hex'), m.status, m.source_chain_id, m.dest_chain_id, encode(m.source_tx,'hex'),
@@ -232,7 +236,11 @@ def bridge_report(conn) -> dict:
                  (SELECT COALESCE(sum(amount),0) FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx
                     AND t.to_addr = %(z)s) AS burned,
                  (SELECT COALESCE(sum(amount),0) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx
-                    AND t.from_addr = %(z)s) AS minted
+                    AND t.from_addr = %(z)s) AS minted,
+                 (SELECT sum(g.amount) FROM ccip_messages g WHERE g.source_chain_id = m.source_chain_id
+                    AND g.source_tx = m.source_tx) AS src_group,
+                 (SELECT sum(g.amount) FROM ccip_messages g WHERE g.dest_chain_id = m.dest_chain_id
+                    AND g.dest_tx = m.dest_tx) AS dst_group
             FROM ccip_messages m ORDER BY m.sent_at DESC NULLS LAST""", {"z": bytes(20)})
         rows = cur.fetchall()
         cur.execute("""SELECT c.chain_id, count(*) FROM ccip_checked c WHERE NOT c.found GROUP BY c.chain_id""")
@@ -242,19 +250,18 @@ def bridge_report(conn) -> dict:
     conn.rollback()
     matched = pending = mismatch = outside = 0
     samples = []
-    for mid, status, src, dst, stx, dtx, amount, burned, minted in rows:
+    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group in rows:
         if status != "SUCCESS":
             pending += 1
             continue
+        burn_ok = burned > 0 and (amount is None or burned == amount or burned == src_group)
+        mint_ok = bool(dtx) and minted > 0 and (amount is None or minted == amount or minted == dst_group)
         if src in indexed and dst in indexed:
-            ok = bool(dtx) and burned == minted and burned > 0
-            side = "both"
+            ok, side = burn_ok and mint_ok, "both"
         elif src in indexed:                                       # delivered on a network we do not index: burn side only
-            ok = amount is not None and burned == amount and burned > 0
-            side = "burn only"
+            ok, side = amount is not None and burn_ok, "burn only"
         elif dst in indexed:                                       # sent from a network we do not index: mint side only
-            ok = amount is not None and minted == amount and minted > 0
-            side = "mint only"
+            ok, side = mint_ok, "mint only"
         else:
             ok, side = False, "neither"
         if ok:
@@ -265,7 +272,8 @@ def bridge_report(conn) -> dict:
         else:
             mismatch += 1
             if len(samples) < 15:
-                samples.append(f"  mismatch {mid[:10]}…  {src}->{dst}  ({side})  ccip {amount}  burned {burned}  minted {minted}")
+                samples.append(f"  mismatch {mid[:10]}…  {src}->{dst}  ({side})  ccip {amount}  burned {burned}  minted {minted}"
+                               f"  group burn/mint {src_group}/{dst_group}")
     for line in samples:
         print(line, flush=True)
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
