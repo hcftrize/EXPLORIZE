@@ -223,12 +223,45 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
     return stats
 
 
+def dataset_summary(conn, log=print) -> dict:
+    """What the stored messages look like (period, per month, per lane), to compare with other CCIP sources."""
+    out = {}
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*), count(DISTINCT source_tx), count(amount), min(sent_at), max(sent_at),
+                              count(*) FILTER (WHERE status = 'SUCCESS')
+                         FROM ccip_messages""")
+        n, txs, with_amount, first, last, ok = cur.fetchone()
+        cur.execute("""SELECT to_char(sent_at, 'YYYY-MM'), count(*), count(amount) FROM ccip_messages
+                        GROUP BY 1 ORDER BY 1""")
+        months = cur.fetchall()
+        cur.execute("""SELECT source_chain_id, dest_chain_id, count(*), count(amount) FROM ccip_messages
+                        GROUP BY 1, 2 ORDER BY 3 DESC""")
+        lanes = cur.fetchall()
+        cur.execute("""SELECT count(*), count(amount) FROM ccip_messages WHERE sent_at >= now() - interval '8 days'""")
+        recent, recent_amount = cur.fetchone()
+        cur.execute("""SELECT max(c) FROM (SELECT count(*) c FROM ccip_messages WHERE source_tx IS NOT NULL
+                                            GROUP BY source_chain_id, source_tx) x""")
+        biggest = cur.fetchone()[0]
+    conn.rollback()
+    log(f"--- stored messages: {n} ({with_amount} with a RIZE amount, {ok} SUCCESS), {txs} distinct send transactions, "
+        f"at most {biggest} messages in one send transaction")
+    log(f"    sent between {first} and {last}; in the last 8 days: {recent} ({recent_amount} with a RIZE amount)")
+    log("    per month (messages / with RIZE amount): " + ", ".join(f"{m}: {c}/{a}" for m, c, a in months))
+    log("    per lane source->dest chain id (messages / with RIZE amount): "
+        + ", ".join(f"{a}->{b}: {c}/{w}" for a, b, c, w in lanes))
+    out.update(messages=n, with_amount=with_amount, first=first, last=last, recent=recent)
+    return out
+
+
 def bridge_report(conn) -> dict:
     """Does every burn have its CCIP message and its mint? Reads only the database.
 
     One transaction can carry several messages (CCIP executes them in a batch): then the mint is the SUM of the
     messages that share the transaction, so each side is compared with the message amount OR with that sum.
-    A network we do not index (Canton) can only be checked on the side we see, and its message may carry no amount."""
+    A network we do not index (Canton) can only be checked on the side we see, and its message may carry no amount.
+    A transaction that is not in our transfers table at all cannot be checked either: it is counted apart
+    ("not_in_transfers"), because that is a gap in the data, not a wrong amount."""
+    dataset_summary(conn)
     with conn.cursor() as cur:
         cur.execute("""
           SELECT encode(m.message_id,'hex'), m.status, m.source_chain_id, m.dest_chain_id, encode(m.source_tx,'hex'),
@@ -240,7 +273,9 @@ def bridge_report(conn) -> dict:
                  (SELECT sum(g.amount) FROM ccip_messages g WHERE g.source_chain_id = m.source_chain_id
                     AND g.source_tx = m.source_tx) AS src_group,
                  (SELECT sum(g.amount) FROM ccip_messages g WHERE g.dest_chain_id = m.dest_chain_id
-                    AND g.dest_tx = m.dest_tx) AS dst_group
+                    AND g.dest_tx = m.dest_tx) AS dst_group,
+                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx) AS src_rows,
+                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx) AS dst_rows
             FROM ccip_messages m ORDER BY m.sent_at DESC NULLS LAST""", {"z": bytes(20)})
         rows = cur.fetchall()
         cur.execute("""SELECT c.chain_id, count(*) FROM ccip_checked c WHERE NOT c.found GROUP BY c.chain_id""")
@@ -248,33 +283,50 @@ def bridge_report(conn) -> dict:
         cur.execute("SELECT chain_id FROM chain_state")
         indexed = {r[0] for r in cur.fetchall()}
     conn.rollback()
-    matched = pending = mismatch = outside = 0
-    samples = []
-    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group in rows:
+    matched = pending = outside = 0
+    reasons: dict[str, int] = {}
+    samples: dict[str, list[str]] = {}
+
+    def flag(reason, mid, src, dst, stx, dtx, amount, burned, minted):
+        reasons[reason] = reasons.get(reason, 0) + 1
+        got = samples.setdefault(reason, [])
+        if len(got) < 3:
+            got.append(f"  [{reason}] message 0x{mid}  {src}->{dst}  ccip {amount}  burned {burned}  minted {minted}\n"
+                       f"      send tx {('0x' + stx) if stx else None}\n      receive tx {('0x' + dtx) if dtx else None}")
+
+    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group, src_rows, dst_rows in rows:
         if status != "SUCCESS":
             pending += 1
             continue
-        burn_ok = burned > 0 and (amount is None or burned == amount or burned == src_group)
-        mint_ok = bool(dtx) and minted > 0 and (amount is None or minted == amount or minted == dst_group)
-        if src in indexed and dst in indexed:
-            ok, side = burn_ok and mint_ok, "both"
-        elif src in indexed:                                       # delivered on a network we do not index: burn side only
-            ok, side = amount is not None and burn_ok, "burn only"
-        elif dst in indexed:                                       # sent from a network we do not index: mint side only
-            ok, side = mint_ok, "mint only"
-        else:
-            ok, side = False, "neither"
-        if ok:
-            if side == "both":
-                matched += 1
+        # each side we index: ok / "absent" (transaction not in our transfers) / "none" (no burn or mint in it) / "differs"
+        def side(rows_n, moved, group, indexed_side):
+            if not indexed_side:
+                return None
+            if not rows_n:
+                return "absent"
+            if moved == 0:
+                return "none"
+            return "ok" if (amount is None or moved == amount or moved == group) else "differs"
+        s_state = side(src_rows, burned, src_group, src in indexed)
+        d_state = side(dst_rows, minted, dst_group, dst in indexed)
+        bad = [(n, st) for n, st in (("burn", s_state), ("mint", d_state)) if st in ("none", "differs")]
+        absent = [n for n, st in (("source", s_state), ("dest", d_state)) if st == "absent"]
+        if bad:
+            flag(" + ".join(f"{n} {st}" for n, st in bad), mid, src, dst, stx, dtx, amount, burned, minted)
+        elif absent:
+            flag("not_in_transfers: " + "+".join(absent), mid, src, dst, stx, dtx, amount, burned, minted)
+        elif s_state is None or d_state is None:
+            if amount is None and s_state is not None:           # burn side only and the message has no amount: nothing to compare
+                flag("burn side without amount", mid, src, dst, stx, dtx, amount, burned, minted)
             else:
                 outside += 1
         else:
-            mismatch += 1
-            if len(samples) < 15:
-                samples.append(f"  mismatch {mid[:10]}…  {src}->{dst}  ({side})  ccip {amount}  burned {burned}  minted {minted}"
-                               f"  group burn/mint {src_group}/{dst_group}")
-    for line in samples:
-        print(line, flush=True)
+            matched += 1
+    for reason, lines in samples.items():
+        print(f"--- {reasons[reason]} x {reason}", flush=True)
+        for line in lines:
+            print(line, flush=True)
+    mismatch = sum(n for r, n in reasons.items() if not r.startswith("not_in_transfers"))
+    gaps = sum(n for r, n in reasons.items() if r.startswith("not_in_transfers"))
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
-            "one_side_only_other_network": outside, "no_message_found": no_msg}
+            "not_in_transfers": gaps, "one_side_only_other_network": outside, "no_message_found": no_msg, "reasons": reasons}
