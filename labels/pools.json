@@ -4,7 +4,7 @@
     {
       "chain": "base",
       "key": "0xea5cb64754ad7aa24f7a6bbe3b724f29b4f822b8",
-      "name": "Aerodrome USDC/RIZE (ts200, 0.3%)",
+      "name": "Aerodrome 1",
       "venue": "aerodrome",
       "kind": "v3",
       "token0": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
@@ -15,12 +15,12 @@
       "gauge": "0xe590b6913d090a012bdbbd9c58a9f0d7309c9356",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "USDC/RIZE, tick spacing 200, fee 0.3%"
     },
     {
       "chain": "base",
       "key": "0x5be479f54363910264ad875b75d314f84c70d08d",
-      "name": "Aerodrome USDC/RIZE (ts100, 1%)",
+      "name": "Aerodrome 2",
       "venue": "aerodrome",
       "kind": "v3",
       "token0": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
@@ -31,12 +31,12 @@
       "gauge": "0x57d7e6df3768950155a1af4dda4566358295d0b9",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "USDC/RIZE, tick spacing 100, fee 1%"
     },
     {
       "chain": "base",
       "key": "0x35bccfe3aed0f09f4184fcb027a95f2afab6e5d3",
-      "name": "Aerodrome RIZE/USDT",
+      "name": "Aerodrome 3",
       "venue": "aerodrome",
       "kind": "v2",
       "token0": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
@@ -47,12 +47,12 @@
       "gauge": "",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "RIZE/USDT"
     },
     {
       "chain": "base",
       "key": "0xca79d837a9a3f7e39c950aac6cde15cd29bfe223",
-      "name": "Aerodrome WETH/RIZE",
+      "name": "Aerodrome 4",
       "venue": "aerodrome",
       "kind": "v3",
       "token0": "0x4200000000000000000000000000000000000006",
@@ -63,12 +63,12 @@
       "gauge": "",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "WETH/RIZE"
     },
     {
       "chain": "base",
       "key": "0x88de691de9ccb392cffdca17331ac78235e43a4c",
-      "name": "Aerodrome RIZE/CRBXB",
+      "name": "Aerodrome 5",
       "venue": "aerodrome",
       "kind": "v2",
       "token0": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
@@ -79,12 +79,12 @@
       "gauge": "",
       "status": "active",
       "source": "manual",
-      "note": "token1 is CRBXB (address starts 0xf0d67eee, to be read from the chain at the next discovery); 0 reserves"
+      "note": "RIZE/CRBXB | token1 is CRBXB (address starts 0xf0d67eee, to be read from the chain at the next discovery); 0 reserves"
     },
     {
       "chain": "base",
       "key": "0x929312aff9e4611bba5da6adcd08b31eb487bbb5",
-      "name": "Aero USDC/RIZE (ts100, 1%) - main pool",
+      "name": "Aero 1",
       "venue": "aero",
       "kind": "v3",
       "token0": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
@@ -95,12 +95,12 @@
       "gauge": "0xfc023fcf196b2930e0c86c11cd5de9a784149a45",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "USDC/RIZE, tick spacing 100, fee 1% (main pool)"
     },
     {
       "chain": "base",
       "key": "0x3ac6fc3c81b3791bcab2e8f50dd1e67a5f1b4134",
-      "name": "Aero USDC/RIZE (ts200, 0.09%)",
+      "name": "Aero 2",
       "venue": "aero",
       "kind": "v3",
       "token0": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
@@ -111,12 +111,12 @@
       "gauge": "",
       "status": "active",
       "source": "manual",
-      "note": ""
+      "note": "USDC/RIZE, tick spacing 200, fee 0.09%"
     },
     {
       "chain": "ethereum",
       "key": "0xbd43b45bda23c14d6917224b709f8eb391bae52158e46613c718597dbe3aa2fe",
-      "name": "Uniswap V4 ETH/RIZE",
+      "name": "Uniswap 1",
       "venue": "uniswap-v4",
       "kind": "v4",
       "token0": "0x0000000000000000000000000000000000000000",
@@ -125,12 +125,12 @@
       "holder": "0x000000000004444c5dc75cb358380d2e3de08a90",
       "status": "active",
       "source": "manual",
-      "note": "V4 singleton: tokens are held by the PoolManager"
+      "note": "V4 pool ETH/RIZE | V4 singleton: tokens are held by the PoolManager"
     },
     {
       "chain": "ethereum",
       "key": "0x208edf160bfc55d36e14db1740240bfb33a05ee649ee52fd24b6bb934d637065",
-      "name": "Uniswap V4 RIZE/USDT",
+      "name": "Uniswap 2",
       "venue": "uniswap-v4",
       "kind": "v4",
       "token0": "0x9f1e8f87c6321b84bad7dda7dfb86d5115a47605",
@@ -139,24 +139,24 @@
       "holder": "0x000000000004444c5dc75cb358380d2e3de08a90",
       "status": "active",
       "source": "manual",
-      "note": "confirmed by an on-chain Swap (Etherscan, 2026-09-17)"
+      "note": "V4 pool RIZE/USDT (confirmed by an on-chain Swap, Etherscan 2026-09-17) | confirmed by an on-chain Swap (Etherscan, 2026-09-17)"
     },
     {
       "chain": "ethereum",
       "key": "0x2b512a198b255f0f55d58f974a989c257bdda258",
-      "name": "RFQ market maker RIZE/USDT",
-      "venue": "rfq-ethereum",
+      "name": "DODO 1",
+      "venue": "dodo",
       "kind": "rfq",
       "token0": "0x9f1e8f87c6321b84bad7dda7dfb86d5115a47605",
       "token1": "0xdac17f958d2ee523a2206206994597c13d831ec7",
       "status": "active",
       "source": "manual",
-      "note": "holds RIZE and USDT, fills orders itself (event 0xc2c0245e...)"
+      "note": "DODO private pool (DPPAdvanced contract, Etherscan) holding RIZE and USDT; its swap event is DODOSwap | holds RIZE and USDT, fills orders itself (event 0xc2c0245e...)"
     },
     {
       "chain": "bsc",
       "key": "0x465bd99ae2a0bfae8efac4dc88980d29e4e4c390773d1986cf8dc3087fac2340",
-      "name": "PancakeSwap Infinity USDC/RIZE",
+      "name": "PancakeSwap 1",
       "venue": "pancake-infinity",
       "kind": "infinity",
       "token0": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
@@ -165,7 +165,7 @@
       "holder": "0x238a358808379702088667322f80ac48bad5e6c4",
       "status": "active",
       "source": "manual",
-      "note": "CLPoolManager emits the events, the Vault holds the tokens"
+      "note": "Infinity pool USDC/RIZE (the CLPoolManager emits the events, the Vault holds the tokens)"
     }
   ]
 }
