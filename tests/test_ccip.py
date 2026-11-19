@@ -88,7 +88,7 @@ def test_a_burn_without_message_is_remembered_and_a_wrong_mint_is_flagged(conn):
     chains = [load_chains()["bsc"]]
     ccip.ccip_sync(conn, chains, reg, fetch=fetch, pause=0, log=lambda m: None)
     rep = ccip.bridge_report(conn)
-    assert rep["mismatch"] == 1 and rep["matched"] == 0 and rep["burns_without_message"] == {56: 1}
+    assert rep["mismatch"] == 1 and rep["matched"] == 0 and rep["no_message_found"] == {56: 1}
     n = len(calls)
     ccip.ccip_sync(conn, chains, reg, fetch=fetch, pause=0, log=lambda m: None)
     assert len(calls) == n
@@ -125,4 +125,4 @@ def test_a_message_to_a_network_without_a_number_does_not_crash_and_is_burn_only
     reg = Registry.from_dir()
     ccip.ccip_sync(conn, [load_chains()["bsc"]], reg, fetch=lambda url: {"data": [other]}, pause=0, log=lambda m: None)
     rep = ccip.bridge_report(conn)
-    assert rep["messages"] == 1 and rep["burn_only_other_chain"] == 1 and rep["mismatch"] == 0
+    assert rep["messages"] == 1 and rep["one_side_only_other_network"] == 1 and rep["mismatch"] == 0
