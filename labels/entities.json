@@ -28,98 +28,110 @@
     {
       "address": "0x6131b5fae19ea4f9d964eac0408e4408b66337b5",
       "chain": "all",
-      "label": "KyberSwap Meta Aggregation Router",
+      "label": "KyberSwap",
       "category": "aggregator",
       "source": "seed",
-      "logo": ""
+      "logo": "kyberswap",
+      "role": "KyberSwap Meta Aggregation Router"
     },
     {
       "address": "0x8f10b468b06c6fd214b65f87778827f7d113f996",
       "chain": "ethereum",
-      "label": "KyberSwap executor",
+      "label": "KyberSwap",
       "category": "aggregator",
       "source": "earlier notes, to confirm",
-      "logo": ""
+      "logo": "kyberswap",
+      "role": "KyberSwap executor"
     },
     {
       "address": "0x0000000071727de22e5e9d8baf0edac6f37da032",
       "chain": "all",
-      "label": "ERC-4337 EntryPoint v0.7",
+      "label": "ERC-4337 EntryPoint",
       "category": "account-abstraction",
       "source": "seed",
-      "logo": ""
+      "logo": "",
+      "role": "ERC-4337 EntryPoint v0.7"
     },
     {
       "address": "0x000000000004444c5dc75cb358380d2e3de08a90",
       "chain": "ethereum",
-      "label": "Uniswap V4 PoolManager",
+      "label": "Uniswap",
       "category": "dex",
       "source": "seed",
-      "logo": "uniswap.svg"
+      "logo": "uniswap",
+      "role": "Uniswap V4 PoolManager"
     },
     {
       "address": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
       "chain": "ethereum",
-      "label": "Uniswap V4 Position Manager",
+      "label": "Uniswap",
       "category": "dex",
       "source": "seen in LP transactions",
-      "logo": "uniswap.svg"
+      "logo": "uniswap",
+      "role": "Uniswap V4 Position Manager"
     },
     {
       "address": "0xa0ffb9c1ce1fe56963b0321b32e7a0302114058b",
       "chain": "bsc",
-      "label": "PancakeSwap Infinity CLPoolManager",
+      "label": "PancakeSwap",
       "category": "dex",
       "source": "seed, confirm with --full",
-      "logo": "pancakeswap.svg"
+      "logo": "pancakeswap",
+      "role": "PancakeSwap Infinity CLPoolManager"
     },
     {
       "address": "0x238a358808379702088667322f80ac48bad5e6c4",
       "chain": "bsc",
-      "label": "PancakeSwap Infinity Vault",
+      "label": "PancakeSwap",
       "category": "dex",
       "source": "seen in transfers",
-      "logo": "pancakeswap.svg"
+      "logo": "pancakeswap",
+      "role": "PancakeSwap Infinity Vault"
     },
     {
       "address": "0x34b03cb9086d7d758ac55af71584f81a598759fe",
       "chain": "bsc",
-      "label": "Chainlink CCIP Router (BNB Chain)",
+      "label": "Chainlink CCIP",
       "category": "bridge",
       "source": "seen in burns",
-      "logo": "chainlink.svg"
+      "logo": "chainlink",
+      "role": "Chainlink CCIP Router (BNB Chain)"
     },
     {
       "address": "0x84a0797b31ac0d3e1d06157663dd4b18cffda188",
       "chain": "bsc",
-      "label": "Chainlink CCIP OnRamp (BNB Chain)",
+      "label": "Chainlink CCIP",
       "category": "bridge",
       "source": "seen in burns",
-      "logo": "chainlink.svg"
+      "logo": "chainlink",
+      "role": "Chainlink CCIP OnRamp (BNB Chain)"
     },
     {
       "address": "0xf234609b2e2704b48745a819c89774fe21e4a722",
       "chain": "bsc",
-      "label": "RIZE CCIP token pool (BNB Chain)",
+      "label": "Chainlink CCIP",
       "category": "bridge",
       "source": "seen in burns",
-      "logo": "chainlink.svg"
+      "logo": "chainlink",
+      "role": "RIZE CCIP token pool (BNB Chain)"
     },
     {
       "address": "0x2837e93b4c6f5b1c62dabcdd12671b6ba551ef82",
       "chain": "all",
-      "label": "Arrakis (sender)",
+      "label": "Arrakis",
       "category": "liquidity-manager",
       "source": "seen in LP transactions",
-      "logo": "arrakis.svg"
+      "logo": "arrakis",
+      "role": "Arrakis (sender)"
     },
     {
       "address": "0x2e6e879648293e939aa68ba4c6c129a1be733bda",
       "chain": "all",
-      "label": "Arrakis (executor)",
+      "label": "Arrakis",
       "category": "liquidity-manager",
       "source": "seen in LP transactions",
-      "logo": "arrakis.svg"
+      "logo": "arrakis",
+      "role": "Arrakis (executor)"
     }
   ]
 }
