@@ -243,3 +243,33 @@ def test_a_known_pool_that_only_received_rize_is_a_venue_never_the_trader():
     t = b.trade
     assert t is not None and t["side"] == "sell" and t["trader"] == seller
     assert {f["pool"] for f in t["fills"]} == {pool_a.key, pool_b.key}
+
+
+def test_repair_gives_a_crashed_transaction_another_try(conn):
+    chain = load_chains()["bsc"]
+    rz, usdc = 44070027728000000000173, 99999999999378361648
+    tx = "0x" + "a7" * 32
+    rec = (Rec().transfer(BSC_USDC, BUYER, ROUTER, usdc).transfer(BSC_USDC, ROUTER, VAULT, usdc)
+           .transfer(BSC_RIZE, VAULT, ROUTER, rz).transfer(BSC_RIZE, ROUTER, BUYER, rz)
+           .v4_swap(CLMANAGER, INFINITY_SWAP, ID_BSC, -usdc, rz, extra=(3299,)).done())
+    rec["blockNumber"] = hex(133405634)
+    _seed_transfers(conn, 56, tx, 133405634, [(BSC_RIZE, VAULT, ROUTER, rz), (BSC_RIZE, ROUTER, BUYER, rz)])
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO chain_state (chain_id, slug, token, start_block, last_block) VALUES (56,'bsc',%s,133400000,133406000)",
+                    (bytes.fromhex(BSC_RIZE[2:]),))
+    conn.commit()
+    reg = Registry.from_dir()
+    enrich.sync_registry(conn, reg, load_chains())
+    node = FakeNode({})                                      # the node does not return the receipt today
+    enrich.enrich_chain(chain, node, conn, reg, log=lambda m: None)
+    with conn.cursor() as cur:
+        cur.execute("SELECT reason, detail FROM enrich_review")
+        assert cur.fetchall() == [("crash", "receipt not found")]
+    node.receipts[tx] = rec                                  # it answers now
+    res = enrich.repair_traders(chain, node, conn, reg, log=lambda m: None)
+    assert res["found"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM trades")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM enrich_review WHERE reason = 'crash'")
+        assert cur.fetchone()[0] == 0
