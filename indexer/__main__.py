@@ -32,7 +32,7 @@ def log(msg: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
     p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "inspect", "balance", "status",
-                                          "enrich", "snapshot", "discover", "ccip"])
+                                          "enrich", "snapshot", "discover", "ccip", "repair", "report"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
@@ -69,12 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     budget = args.max_minutes * 60 if args.max_minutes else None
     t_start = time.monotonic()
     reg = None
-    if args.command in ("enrich", "snapshot", "discover", "ccip"):
+    if args.command in ("enrich", "snapshot", "discover", "ccip", "repair", "report"):
         db.init_schema(conn)                                  # idempotent: creates the market tables on first use
         db.ensure_chains(conn, chains)
         reg = Registry.from_dir()
         enrich_mod.sync_registry(conn, reg, config.load_chains())
         log(f"registry: {len(reg.pools())} pools ({sum(1 for x in reg.pools() if x.source == 'auto')} found automatically)")
+    if args.command == "report":
+        enrich_mod.report(conn, log)
+        return 0
     if args.command == "ccip":
         ccip_sync(conn, chains, reg, limit=args.limit, max_seconds=budget, log=log)
         log(f"bridge report: {bridge_report(conn)}")
@@ -113,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
                     log(f"[{c.key}] trades, liquidity moves and checkpoint cleared; recomputing")
                 left = None if budget is None else max(budget - (time.monotonic() - t_start), 1.0)
                 enrich_mod.enrich_chain(c, client, conn, reg, max_seconds=left, log=log)
+            elif args.command == "repair":
+                left = None if budget is None else max(budget - (time.monotonic() - t_start), 1.0)
+                enrich_mod.repair_traders(c, client, conn, reg, max_seconds=left, log=log)
             elif args.command == "snapshot":
                 enrich_mod.snapshot(c, client, conn, reg, log=log)
             elif args.command == "discover":
