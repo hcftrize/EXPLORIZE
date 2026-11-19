@@ -9,7 +9,7 @@ Three families, all verified on real RIZE transactions:
       ModifyLiquidity(id, sender, tickLower, tickUpper, liquidityDelta, salt)
   The tokens sit in the manager (Uniswap) or in a separate Vault (Pancake). Native ETH / BNB legs leave no token log: the
   amounts of the event are the only exact source for them.
-* An RFQ market maker (Ethereum): a contract that holds RIZE and USDT and fills orders itself, event
+* A DODO private pool (Ethereum, "DODO 1", kind rfq in the registry): a contract that holds RIZE and USDT and fills swaps itself, event
       Fill(tokenA, tokenB, amountA, amountB, ...)   with the two tokens in either order.
 
 This module turns the logs of one receipt into (a) the venue addresses to hand to `receipts.reconcile`, and (b) after the
