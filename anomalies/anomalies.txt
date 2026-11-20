@@ -1,0 +1,5 @@
+# EXPLORIZE ANOMALIES
+# Written by the "Unified update explorize" workflow. Every anomaly appears once, under the day it was first seen.
+# They never block the publication of the data: look at them from time to time and fix the causes (labels, pools, data).
+# The tag at the end of each line (the word key, an equal sign, then the identifier, in square brackets) identifies the anomaly:
+# do not edit it, or the anomaly will be written again.
