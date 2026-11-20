@@ -318,3 +318,26 @@ def test_a_chain_far_from_its_head_after_the_budget_stops_the_run(conn, monkeypa
         unified.run_unified(s, list(chains.values()), nodes, Registry.from_dir(), log=lambda m: None)
     assert "catch up" in str(e.value)
     s.abort(); s.close()
+
+
+def test_the_top_holders_table_is_rebuilt_only_when_it_is_old_enough(conn, monkeypatch):
+    chains, nodes = world(conn)
+    stub_phases(monkeypatch)
+    s, out, found = run(conn, chains, nodes)                       # first run: balances never read -> table built
+    s.publish(); s.close()
+    assert out["holders"]["rebuilt"] is True
+    first = other("SELECT updated_at, base_block FROM holders_meta")
+    s, out, found = run(conn, chains, nodes)                       # right after: balances stay current, table untouched
+    s.publish(); s.close()
+    assert out["holders"]["rebuilt"] is False and out["balances"]["base"]["seeded"] is False
+    assert other("SELECT updated_at, base_block FROM holders_meta") == first
+    assert other("SELECT count(*) FROM unified_runs WHERE ok") == [(2,)]
+    with conn.cursor() as cur:                                     # a day later: rebuilt again
+        cur.execute("UPDATE holders_meta SET updated_at = now() - interval '25 hours'")
+    conn.commit()
+    s, out, found = run(conn, chains, nodes)
+    s.publish(); s.close()
+    assert out["holders"]["rebuilt"] is True
+    s, out, found = run(conn, chains, nodes, ranking_every_hours=0)  # 0 = every run
+    s.publish(); s.close()
+    assert out["holders"]["rebuilt"] is True
