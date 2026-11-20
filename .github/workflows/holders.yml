@@ -2,8 +2,9 @@ name: Explorize holders
 
 # Rebuilds the RIZE Top Holders ranking (live balances on 4 chains + governance bonds on Base).
 # Separate from the transfer sync on purpose: if one fails, the other keeps working.
-# Started by hand only (the daily schedule was removed): the "Unified update explorize" workflow now refreshes the ranking at every
-# run, in the same transaction as everything else. Use this one only for a full rebuild from the chains.
+# Started by hand only (the daily schedule was removed): the "Unified update explorize" workflow now rebuilds the ranking itself,
+# once a day (RANKING_EVERY_HOURS, 24 by default), in the same transaction as everything else. Use this one only for a full rebuild
+# from the chains, or as an independent cross-check.
 # A failed run writes nothing: the previous ranking stays online ("updated X ago" on the page shows its age).
 on:
   workflow_dispatch:
