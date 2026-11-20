@@ -217,3 +217,37 @@ def test_the_report_describes_the_stored_messages(conn, capsys):
     info = ccip.dataset_summary(conn)
     assert info["messages"] == 1 and info["with_amount"] == 1 and info["recent"] == 1
     assert "stored messages: 1" in capsys.readouterr().out
+
+
+class FakeClient:
+    def __init__(self, receipts):
+        self.receipts = receipts
+
+    def get_transaction_receipt(self, tx):
+        return self.receipts.get(tx)
+
+
+def _log(token, frm, to):
+    from indexer.logs import TRANSFER_TOPIC0
+    pad = lambda a: "0x" + a[2:].rjust(64, "0")  # noqa: E731
+    return {"address": token, "topics": [TRANSFER_TOPIC0, pad(frm), pad(to)], "data": "0x" + "00" * 31 + "01"}
+
+
+def test_gap_check_tells_a_hole_in_our_data_from_a_transaction_without_rize(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    reg = Registry.from_dir()
+    rize_bsc = reg.rize("bsc")
+    hole_tx, other_tx, mint = "0x" + "a0" * 32, "0x" + "a1" * 32, "0x" + "a2" * 32
+    put(conn, 8453, mint, zero, WALLET, 1, block=7)                      # a mint we do hold, so this side is fine
+    _msg(conn, "0x" + "d1" * 32, 56, 8453, hole_tx, mint, 5)             # burn on BSC missing from our transfers
+    _msg(conn, "0x" + "d2" * 32, 56, 8453, other_tx, mint, 6)
+    clients = {
+        56: FakeClient({
+            hole_tx: {"blockNumber": hex(1000), "logs": [_log(rize_bsc, WALLET, zero)]},
+            other_tx: {"blockNumber": hex(2000), "logs": [_log("0x" + "bb" * 20, WALLET, zero)]}}),
+        8453: FakeClient({})}
+    out = ccip.gap_check(conn, clients, reg, limit=10, log=lambda m: None)
+    assert out["candidates"] == 2 and out["checked"] == 2
+    assert out["verdicts"] == {"HOLE: receipt has RIZE transfers we lack": 1, "no RIZE transfer in this transaction": 1}
+    assert out["holes"] == {56: [1000]}
