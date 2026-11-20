@@ -251,3 +251,73 @@ def test_gap_check_tells_a_hole_in_our_data_from_a_transaction_without_rize(conn
     assert out["candidates"] == 2 and out["checked"] == 2
     assert out["verdicts"] == {"HOLE: receipt has RIZE transfers we lack": 1, "no RIZE transfer in this transaction": 1}
     assert out["holes"] == {56: [1000]}
+
+
+def test_messages_of_other_tokens_are_purged_but_a_message_from_canton_is_kept(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    burn = "0x" + "e1" * 32
+    put(conn, 8453, burn, WALLET, zero, 3 * 10 ** 18, block=1)
+    with conn.cursor() as cur:
+        for mid, src, stx, amount in (("f1", 8453, "0x" + "e2" * 32, None),      # other token: its send transaction holds no RIZE of ours
+                                      ("f2", 8453, burn, None),                  # a RIZE burn whose message has no amount: kept
+                                      ("f3", 0, None, None),                     # from Canton: kept
+                                      ("f4", 56, "0x" + "e3" * 32, 5)):          # has an amount: kept
+            cur.execute("INSERT INTO ccip_messages (message_id, status, source_chain_id, dest_chain_id, source_tx, amount) "
+                        "VALUES (%s,'SUCCESS',%s,56,%s,%s)",
+                        (bytes.fromhex(mid * 32), src, bytes.fromhex(stx[2:]) if stx else None, amount))
+    conn.commit()
+    assert ccip.purge_foreign(conn) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT encode(message_id,'hex') FROM ccip_messages ORDER BY 1")
+        assert [r[0][:2] for r in cur.fetchall()] == ["f2", "f3", "f4"]
+
+
+def test_a_mint_not_fully_explained_by_its_messages_is_looked_up_again(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    s1, s2, mint = "0x" + "11" * 32, "0x" + "22" * 32, "0x" + "33" * 32
+    put(conn, 8453, mint, zero, WALLET, 95 * 10 ** 18, block=3)
+    _msg(conn, "0x" + "a1" * 32, 8453, 8453, s1, mint, 54 * 10 ** 18)
+    assert [h.hex() for h, *_ in ccip.mints_to_check(conn, 8453, 10)] == [mint[2:]]       # 54 of 95 known: ask again
+    _msg(conn, "0x" + "a2" * 32, 8453, 8453, s2, mint, 41 * 10 ** 18)
+    assert ccip.mints_to_check(conn, 8453, 10) == []                                          # 95 of 95: nothing to ask
+
+
+def test_a_batch_partner_of_another_token_is_not_stored(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    put(conn, 8453, RECEIPT, zero, WALLET, AMOUNT, block=9)
+    ours = dict(MESSAGE, receiptTransactionHash=RECEIPT)
+    partner = dict(MESSAGE, messageId="0x" + "ab" * 32, sendTransactionHash="0x" + "cd" * 32, receiptTransactionHash=RECEIPT,
+                   sourceTokenAmount={"tokenAddress": "0x" + "12" * 20, "tokenAmount": "5"})
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        return {"data": [ours, partner]}
+
+    stats = ccip.ccip_sync(conn, [load_chains()["bsc"], load_chains()["base"]], Registry.from_dir(), fetch=fetch, pause=0, log=lambda m: None)
+    assert stats["mints_checked"] == 1 and stats["dropped"] == 1 and stats["messages"] == 1
+    assert "limit=100" in asked[0]
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM ccip_messages")
+        assert cur.fetchone()[0] == 1
+
+
+def test_a_young_burn_without_message_is_asked_again_and_an_old_one_is_written_off(conn):
+    zero = "0x" + "00" * 20
+    indexed(conn, 56, 8453)
+    now = dt.datetime.now(dt.timezone.utc)
+    young, old = "0x" + "a5" * 32, "0x" + "a6" * 32
+    with conn.cursor() as cur:
+        for tx, when in ((young, now), (old, now - dt.timedelta(hours=2))):
+            cur.execute("INSERT INTO transfers VALUES (56, 7, %s, %s, 0, %s, %s, %s)",
+                        (when, bytes.fromhex(tx[2:]), bytes.fromhex(WALLET[2:]), bytes(20), 10 ** 18))
+    conn.commit()
+    stats = ccip.ccip_sync(conn, [load_chains()["bsc"]], Registry.from_dir(), fetch=lambda url: {"data": []}, pause=0,
+                           log=lambda m: None, grace_minutes=15, now=now)
+    assert stats["deferred"] == 1 and stats["burns_checked"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT encode(tx_hash,'hex') FROM ccip_checked")
+        assert [r[0] for r in cur.fetchall()] == [old[2:]]
