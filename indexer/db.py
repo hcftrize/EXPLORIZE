@@ -21,6 +21,52 @@ def connect(url: str):
     return conn
 
 
+class StagedConnection:
+    """One database transaction for a whole run: nothing is visible to the site until publish().
+
+    The indexer code calls commit() after each step and rollback() to recover from an error. Here commit() only moves a savepoint
+    and rollback() goes back to the last one, so every step behaves exactly as before, yet the real COMMIT happens once, at the
+    end, if every check passed (publish). Anything else (error, failed check, killed process) leaves the database untouched."""
+
+    SP = "explorize_stage"
+
+    def __init__(self, raw):
+        self._raw = raw
+        raw.autocommit = False
+        self._exec(f"SAVEPOINT {self.SP}")
+
+    def _exec(self, sql: str) -> None:
+        with self._raw.cursor() as cur:
+            cur.execute(sql)
+
+    def commit(self) -> None:
+        self._exec(f"RELEASE SAVEPOINT {self.SP}")
+        self._exec(f"SAVEPOINT {self.SP}")
+
+    def rollback(self) -> None:
+        self._exec(f"ROLLBACK TO SAVEPOINT {self.SP}")
+
+    def publish(self) -> None:
+        self._exec(f"RELEASE SAVEPOINT {self.SP}")
+        self._raw.commit()
+
+    def abort(self) -> None:
+        self._raw.rollback()
+
+    def cursor(self, *args, **kwargs):
+        return self._raw.cursor(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def connect_staged(url: str) -> StagedConnection:
+    """Direct connection kept alive for minutes (keepalives), wrapped so that nothing is committed before publish()."""
+    raw = psycopg2.connect(url, connect_timeout=20, application_name="explorize-unified", keepalives=1,
+                           keepalives_idle=30, keepalives_interval=10, keepalives_count=6)
+    return StagedConnection(raw)
+
+
 def init_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(SCHEMA_FILE.read_text())
