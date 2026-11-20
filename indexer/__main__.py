@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 
@@ -29,10 +31,79 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def run_unified_command(args) -> int:
+    """UNIFIED UPDATE EXPLORIZE: everything in one transaction, published when it is all at the same blocks (see indexer/unified.py).
+    Anomalies never stop the publication: they are appended (once each) to the text file anomalies/ANOMALIES.txt."""
+    import traceback
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from . import anomalies as anomalies_mod
+    from .unified import RunFailed, record, run_unified
+
+    if args.chain != "all":
+        raise SystemExit("unified always updates every chain together: do not pass --chain")
+    path = Path(os.environ.get("ANOMALIES_FILE", "anomalies/ANOMALIES.txt"))
+
+    def write(items) -> None:
+        try:
+            n = anomalies_mod.append(path, items)
+            if n:
+                log(f"{n} new anomaly line(s) written to {path}")
+        except Exception as e:  # noqa: BLE001 - the anomaly file must never break a run
+            log(f"could not write {path}: {type(e).__name__}")
+
+    day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+    url = config.database_url()
+    chains = config.select_chains("all")
+    started = datetime.now(timezone.utc)
+    setup = db.connect(url)                       # tables first, on their own connection: schema statements lock tables
+    try:
+        db.init_schema(setup)
+    finally:
+        setup.close()
+    reg = Registry.from_dir()
+    clients = {c.key: make_client(c) for c in chains}
+    conn = db.connect_staged(url)
+    budget = (args.max_minutes or 25) * 60
+    found: list = []
+    try:
+        summary = run_unified(conn, chains, clients, reg, max_seconds=budget, log=log, anomalies=found)
+        if summary.get("skipped"):
+            conn.abort()
+            log(f"SKIPPED: {summary['skipped']}")
+            return 0
+        conn.publish()
+        log(f"PUBLISHED. {json.dumps(summary, default=str)}")
+        write(found)
+        return 0
+    except RunFailed as e:
+        conn.abort()
+        log(f"NOT PUBLISHED (the site keeps the last good state): {e}")
+        record(url, started, False, {"failed": True}, str(e)[:2000])
+        # only the reason is written: the anomalies found by this run belong to data that was rolled back, the next run finds them again
+        write([(f"blocked:{code}:{day}", "NOT PUBLISHED", str(e)[:300]) for code in (e.codes or ["other"])[:1]])
+        return 1
+    except BaseException as e:  # noqa: BLE001 - whatever happens, nothing half-done is published
+        try:
+            conn.abort()
+        except Exception:  # noqa: BLE001
+            pass
+        traceback.print_exc()
+        log(f"NOT PUBLISHED (the site keeps the last good state): {type(e).__name__}")
+        try:
+            record(url, started, False, {"crashed": True}, f"{type(e).__name__}"[:300])
+        except Exception:  # noqa: BLE001
+            pass
+        # the repository is public: only the kind of error is written, never its text (it could carry a host name)
+        write([(f"error:{type(e).__name__}:{day}", "NOT PUBLISHED", f"the run stopped on an error ({type(e).__name__}); see the workflow log")])
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
     p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "inspect", "balance", "status",
-                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report"])
+                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report", "unified"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
@@ -64,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         conn = db.connect(config.database_url())
         ok &= probe_db(conn, log)
         return 0 if ok else 1
+
+    if args.command == "unified":
+        return run_unified_command(args)
 
     conn = db.connect(config.database_url())
     budget = args.max_minutes * 60 if args.max_minutes else None
