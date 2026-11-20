@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: "enrich, snapshot, discover, ccip, repair or report"
+        description: "enrich, snapshot, discover, ccip, ccip-gaps, repair or report"
         type: choice
         default: enrich
         options:
@@ -16,6 +16,7 @@ on:
           - snapshot
           - discover
           - ccip
+          - ccip-gaps
           - repair
           - report
       chain:
@@ -29,7 +30,7 @@ on:
         type: boolean
         default: false
       limit:
-        description: "ccip only: burn transactions looked up per chain in this run"
+        description: "ccip: burn transactions looked up per chain; ccip-gaps: how many missing transactions to read from the chain"
         default: "300"
 
 jobs:
