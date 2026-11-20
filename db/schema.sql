@@ -241,11 +241,29 @@ CREATE TABLE IF NOT EXISTS tokens (
   PRIMARY KEY (chain_id, address)
 );
 
+-- Unified update: live balances (kept up to date incrementally, one row per chain and address) and the log of published runs.
+ALTER TABLE chain_state ADD COLUMN IF NOT EXISTS balances_block bigint;     -- block up to which holder_balances is exact
+CREATE TABLE IF NOT EXISTS holder_balances (
+  chain_id  integer       NOT NULL,
+  addr      bytea         NOT NULL,
+  balance   numeric(78,0) NOT NULL,
+  PRIMARY KEY (chain_id, addr)
+);
+CREATE TABLE IF NOT EXISTS unified_runs (
+  id          bigserial   PRIMARY KEY,
+  started_at  timestamptz NOT NULL,
+  finished_at timestamptz NOT NULL DEFAULT now(),
+  ok          boolean     NOT NULL,
+  summary     jsonb,
+  note        text
+);
+CREATE INDEX IF NOT EXISTS unified_runs_ok_idx ON unified_runs (ok, started_at DESC);
+
 -- The site connects with a read-only role; give it the new tables (no-op if the role does not exist).
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'explorize_ro') THEN
-    GRANT SELECT ON bonds, holders, holders_meta, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_messages, ccip_checked, venues, tokens TO explorize_ro;
+    GRANT SELECT ON bonds, holders, holders_meta, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_messages, ccip_checked, venues, tokens, unified_runs TO explorize_ro;
   END IF;
 END
 $$;
