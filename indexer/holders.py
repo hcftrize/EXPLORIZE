@@ -103,21 +103,11 @@ def read_balances(client, token: str, block: str, addresses: list[str], log) -> 
     return out
 
 
-def build(clients: dict[str, RpcClient], chains: dict[str, config.Chain], conn, log, now=None) -> dict:
-    """Read everything and return the snapshot (nothing is written here)."""
-    t0 = time.monotonic()
-    seen = known_addresses(conn)
-    base_client = clients["base"]
-    heads = {k: clients[k].block_number() for k in chains}
-    blocks = {k: hex(h) for k, h in heads.items()}
-    snap_ts = base_client.get_block_timestamps([heads["base"]])[heads["base"]]
-    log(f"Snapshot: Base block {heads['base']} ({datetime.fromtimestamp(snap_ts, timezone.utc):%Y-%m-%d %H:%M} UTC)")
-
-    # 1. governance state (Base)
-    bonds, supply = read_all_bonds(base_client, blocks["base"], log)
-    vesting = read_vesting(base_client, blocks["base"], bonds)
-    (ok_b, bal), = multicall(base_client, [(chains["base"].token, call_address(SEL_BALANCE_OF, GOVERNANCE))],
-                             blocks["base"])
+def read_governance(base_client, block: str, base_token: str, log) -> dict:
+    """The governance contract on Base at one block: every bond, its vesting, and what each owner still has inside."""
+    bonds, supply = read_all_bonds(base_client, block, log)
+    vesting = read_vesting(base_client, block, bonds)
+    (ok_b, bal), = multicall(base_client, [(base_token, call_address(SEL_BALANCE_OF, GOVERNANCE))], block)
     if not ok_b:
         raise RpcError("balanceOf(GovernanceBonding) failed")
     contract_balance = dec_uint(bal)
@@ -139,6 +129,42 @@ def build(clients: dict[str, RpcClient], chains: dict[str, config.Chain], conn, 
         o["queued"] += b["broken"]
         o["vested_locked"] += b["vested"]
         o["count"] += 1
+    return {"bonds": active, "vesting": vesting, "per_owner": per_owner, "contract_balance": contract_balance,
+            "bonded_total": s_bonded, "queued_total": s_queued, "diff": diff, "supply": supply}
+
+
+def rank_holders(held: dict[str, dict[str, int]], per_owner: dict[str, dict]) -> tuple[list[dict], int]:
+    """Totals and ranking: held (per chain) + bonded + queued. Returns (top N rows, number of wallets holding RIZE)."""
+    rows = []
+    for a in set(held) | set(per_owner):
+        h = held.get(a, {})
+        o = per_owner.get(a, {"bonded": 0, "queued": 0, "vested_locked": 0, "count": 0})
+        held_total = sum(h.values())
+        total = held_total + o["bonded"] + o["queued"]
+        if total > 0 and a != ZERO:
+            rows.append({"address": a, "held": held_total, "held_by_chain": {k: str(v) for k, v in h.items()},
+                         "bonded": o["bonded"], "queued": o["queued"], "vested_locked": o["vested_locked"],
+                         "bond_count": o["count"], "total": total})
+    rows.sort(key=lambda r: (-r["total"], r["address"]))
+    top = rows[:TOP_N]
+    for n, r in enumerate(top, 1):
+        r["rank"] = n
+    return top, len(rows)
+
+
+def build(clients: dict[str, RpcClient], chains: dict[str, config.Chain], conn, log, now=None) -> dict:
+    """Read everything and return the snapshot (nothing is written here)."""
+    t0 = time.monotonic()
+    seen = known_addresses(conn)
+    base_client = clients["base"]
+    heads = {k: clients[k].block_number() for k in chains}
+    blocks = {k: hex(h) for k, h in heads.items()}
+    snap_ts = base_client.get_block_timestamps([heads["base"]])[heads["base"]]
+    log(f"Snapshot: Base block {heads['base']} ({datetime.fromtimestamp(snap_ts, timezone.utc):%Y-%m-%d %H:%M} UTC)")
+
+    # 1. governance state (Base)
+    gov = read_governance(base_client, blocks["base"], chains["base"].token, log)
+    per_owner = gov["per_owner"]
 
     # 2. live balances: every known address on its chains; bond owners are added on Base
     wanted = {k: set(v) for k, v in seen.items()}
@@ -157,24 +183,12 @@ def build(clients: dict[str, RpcClient], chains: dict[str, config.Chain], conn, 
                 held.setdefault(a, {})[key] = v
 
     # 3. totals and ranking
-    rows = []
-    for a in set(held) | set(per_owner):
-        h = held.get(a, {})
-        o = per_owner.get(a, {"bonded": 0, "queued": 0, "vested_locked": 0, "count": 0})
-        held_total = sum(h.values())
-        total = held_total + o["bonded"] + o["queued"]
-        if total > 0 and a != ZERO:
-            rows.append({"address": a, "held": held_total, "held_by_chain": {k: str(v) for k, v in h.items()},
-                         "bonded": o["bonded"], "queued": o["queued"], "vested_locked": o["vested_locked"],
-                         "bond_count": o["count"], "total": total})
-    rows.sort(key=lambda r: (-r["total"], r["address"]))
-    top = rows[:TOP_N]
-    for n, r in enumerate(top, 1):
-        r["rank"] = n
+    top, total_holders = rank_holders(held, per_owner)
 
-    return {"top": top, "bonds": active, "vesting": vesting, "diff": diff, "contract_balance": contract_balance,
-            "bonded_total": s_bonded, "queued_total": s_queued, "base_block": heads["base"],
-            "snapshot_ts": snap_ts, "addresses_read": n_read, "holders_total": len(rows),
+    return {"top": top, "bonds": gov["bonds"], "vesting": gov["vesting"], "diff": gov["diff"],
+            "contract_balance": gov["contract_balance"], "bonded_total": gov["bonded_total"],
+            "queued_total": gov["queued_total"], "base_block": heads["base"],
+            "snapshot_ts": snap_ts, "addresses_read": n_read, "holders_total": total_holders,
             "seconds": time.monotonic() - t0}
 
 
