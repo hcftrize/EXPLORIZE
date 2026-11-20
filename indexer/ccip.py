@@ -349,3 +349,76 @@ def bridge_report(conn) -> dict:
     gaps = sum(n for r, n in reasons.items() if r.startswith("not_in_transfers"))
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
             "not_in_transfers": gaps, "one_side_only_other_network": outside, "no_message_found": no_msg, "reasons": reasons}
+
+
+def gap_candidates(conn) -> list[dict]:
+    """Transactions of SUCCESS messages, on a chain we index, that have no row at all in our transfers, oldest first."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT chain_id FROM chain_state")
+        indexed = {r[0] for r in cur.fetchall()}
+        cur.execute("""
+          SELECT m.source_chain_id, m.source_tx, m.dest_chain_id, m.dest_tx, m.sent_at, encode(m.message_id,'hex'), m.amount,
+                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx),
+                 (SELECT count(*) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx)
+            FROM ccip_messages m WHERE m.status = 'SUCCESS' ORDER BY m.sent_at NULLS FIRST""")
+        rows = cur.fetchall()
+    conn.rollback()
+    seen, out = set(), []
+    for sc, stx, dc, dtx, sent, mid, amount, srows, drows in rows:
+        for side, chain, tx, n in (("source", sc, stx, srows), ("dest", dc, dtx, drows)):
+            if chain in indexed and tx is not None and not n and (chain, bytes(tx)) not in seen:
+                seen.add((chain, bytes(tx)))
+                out.append({"side": side, "chain_id": chain, "tx": bytes(tx), "sent_at": sent, "message": mid, "amount": amount})
+    return out
+
+
+def gap_check(conn, clients: dict, reg: Registry, *, limit: int = 20, log=print) -> dict:
+    """Why is a CCIP transaction missing from our transfers? Reads its receipt from the chain, on a sample spread over time:
+    either the receipt holds RIZE Transfer events our database lacks (a HOLE in what we synced: re-scan that block range),
+    or it holds none (the message does not move our RIZE token the way we assumed)."""
+    from .logs import TRANSFER_TOPIC0
+    cands = [c for c in gap_candidates(conn) if c["chain_id"] in clients]
+    log(f"[gaps] {len(cands)} CCIP transactions have no row in our transfers; reading {min(limit, len(cands))} of them")
+    if not cands:
+        return {"candidates": 0}
+    step = max(len(cands) / max(limit, 1), 1.0)
+    sample = [cands[int(i * step)] for i in range(min(limit, len(cands)))]
+    verdicts: dict[str, int] = {}
+    holes: dict[int, list[int]] = {}
+    for c in sample:
+        client = clients[c["chain_id"]]
+        slug = next((k for k, v in {"base": 8453, "ethereum": 1, "bsc": 56, "polygon": 137}.items() if v == c["chain_id"]), str(c["chain_id"]))
+        rize = reg.rize(slug).lower()
+        txh = "0x" + c["tx"].hex()
+        try:
+            rc = client.get_transaction_receipt(txh)
+        except Exception as e:  # noqa: BLE001 - one failed read must not stop the others
+            log(f"  [{slug}] {txh}  could not read the receipt: {type(e).__name__}: {e}")
+            verdicts["receipt unreadable"] = verdicts.get("receipt unreadable", 0) + 1
+            continue
+        if not rc:
+            verdicts["receipt not found"] = verdicts.get("receipt not found", 0) + 1
+            log(f"  [{slug}] {txh}  receipt not found")
+            continue
+        block = int(rc["blockNumber"], 16)
+        transfers = [l for l in rc.get("logs", []) if l.get("topics") and l["topics"][0].lower() == TRANSFER_TOPIC0 and len(l["topics"]) == 3]
+        mine = [l for l in transfers if l["address"].lower() == rize]
+        others = sorted({l["address"].lower() for l in transfers if l["address"].lower() != rize})
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM transfers WHERE chain_id = %s AND block_number BETWEEN %s AND %s",
+                        (c["chain_id"], block - 200, block + 200))
+            near = cur.fetchone()[0]
+        conn.rollback()
+        if mine:
+            verdict = "HOLE: receipt has RIZE transfers we lack"
+            holes.setdefault(c["chain_id"], []).append(block)
+        else:
+            verdict = "no RIZE transfer in this transaction"
+        verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        log(f"  [{slug}] {c['side']} of message 0x{c['message']} sent {c['sent_at']}  block {block}  tx {txh}\n"
+            f"      {len(mine)} RIZE transfer(s); other tokens moved: {', '.join(others) or 'none'}; "
+            f"transfers we hold within 200 blocks of it: {near}  ->  {verdict}")
+    for cid, blocks in holes.items():
+        log(f"[gaps] chain {cid}: holes seen at blocks {sorted(blocks)}")
+    log(f"[gaps] verdicts: {verdicts}")
+    return {"candidates": len(cands), "checked": len(sample), "verdicts": verdicts, "holes": holes}
