@@ -32,7 +32,7 @@ def log(msg: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
     p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "inspect", "balance", "status",
-                                          "enrich", "snapshot", "discover", "ccip", "repair", "report"])
+                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     budget = args.max_minutes * 60 if args.max_minutes else None
     t_start = time.monotonic()
     reg = None
-    if args.command in ("enrich", "snapshot", "discover", "ccip", "repair", "report"):
+    if args.command in ("enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report"):
         db.init_schema(conn)                                  # idempotent: creates the market tables on first use
         db.ensure_chains(conn, chains)
         reg = Registry.from_dir()
@@ -77,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         log(f"registry: {len(reg.pools())} pools ({sum(1 for x in reg.pools() if x.source == 'auto')} found automatically)")
     if args.command == "report":
         enrich_mod.report(conn, log)
+        return 0
+    if args.command == "ccip-gaps":
+        from .ccip import gap_check
+        clients = {c.chain_id: make_client(c) for c in chains}
+        gap_check(conn, clients, reg, limit=args.limit, log=log)
         return 0
     if args.command == "ccip":
         ccip_sync(conn, chains, reg, limit=args.limit, max_seconds=budget, log=log)
