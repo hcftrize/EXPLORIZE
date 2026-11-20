@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg2.extras
 
@@ -118,28 +118,31 @@ def save_message(conn, row: dict) -> None:
                      "raw": psycopg2.extras.Json(row["raw"])})
 
 
-def burns_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int]]:
+def burns_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int, object]]:
     """Burn transactions (RIZE sent to the zero address), newest first, not looked up yet."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT t.tx_hash, max(t.block_number) FROM transfers t
+        cur.execute("""SELECT t.tx_hash, max(t.block_number), max(t.block_time) FROM transfers t
                         WHERE t.chain_id = %s AND t.to_addr = %s
                           AND NOT EXISTS (SELECT 1 FROM ccip_checked c WHERE c.chain_id = t.chain_id AND c.tx_hash = t.tx_hash)
                         GROUP BY t.tx_hash ORDER BY max(t.block_number) DESC LIMIT %s""", (chain_id, bytes(20), limit))
-        rows = [(bytes(h), b) for h, b in cur.fetchall()]
+        rows = [(bytes(h), b, ts) for h, b, ts in cur.fetchall()]
     conn.rollback()
     return rows
 
 
-def mints_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int]]:
-    """Mint transactions (RIZE created from the zero address), newest first, that no stored message accounts for and that were
-    not looked up yet: these are the deliveries from networks we do not index (Canton...)."""
+def mints_to_check(conn, chain_id: int, limit: int) -> list[tuple[bytes, int, object]]:
+    """Mint transactions (RIZE created from the zero address), newest first, not looked up yet, whose RIZE the stored messages do
+    not fully account for: either no message at all, or a batch with more RIZE minted than the messages we know (the rest comes
+    from networks we do not index: Canton...)."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT t.tx_hash, max(t.block_number) FROM transfers t
+        cur.execute("""SELECT t.tx_hash, max(t.block_number), max(t.block_time) FROM transfers t
                         WHERE t.chain_id = %s AND t.from_addr = %s
-                          AND NOT EXISTS (SELECT 1 FROM ccip_messages m WHERE m.dest_chain_id = t.chain_id AND m.dest_tx = t.tx_hash)
                           AND NOT EXISTS (SELECT 1 FROM ccip_checked c WHERE c.chain_id = t.chain_id AND c.tx_hash = t.tx_hash)
-                        GROUP BY t.tx_hash ORDER BY max(t.block_number) DESC LIMIT %s""", (chain_id, bytes(20), limit))
-        rows = [(bytes(h), b) for h, b in cur.fetchall()]
+                        GROUP BY t.chain_id, t.tx_hash
+                       HAVING sum(t.amount) > COALESCE((SELECT sum(m.amount) FROM ccip_messages m
+                                                         WHERE m.dest_chain_id = t.chain_id AND m.dest_tx = t.tx_hash), 0)
+                        ORDER BY max(t.block_number) DESC LIMIT %s""", (chain_id, bytes(20), limit))
+        rows = [(bytes(h), b, ts) for h, b, ts in cur.fetchall()]
     conn.rollback()
     return rows
 
@@ -153,14 +156,60 @@ def open_messages(conn, limit: int) -> list[bytes]:
     return rows
 
 
+def purge_foreign(conn) -> int:
+    """Remove messages that are not about RIZE: no RIZE amount, sent from a network we index, and whose send transaction holds no
+    RIZE transfer of ours. They were picked up as batch partners of a real RIZE delivery (CCIP executes many messages, of any
+    token, in one transaction). A message from a network we do not index (Canton) has no amount to check and is kept."""
+    with conn.cursor() as cur:
+        cur.execute("""DELETE FROM ccip_messages m
+                        WHERE m.amount IS NULL
+                          AND m.source_chain_id IN (SELECT chain_id FROM chain_state)
+                          AND NOT EXISTS (SELECT 1 FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx)""")
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
 def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: float | None = None, fetch=http_get,
-              pause: float = PAUSE, log=print) -> dict:
+              pause: float = PAUSE, log=print, grace_minutes: float = 0.0, now=None) -> dict:
+    """Look up what is new. A burn or mint younger than `grace_minutes` with no message yet is NOT written off (the API may not
+    have indexed it yet): it is asked again at the next run. With grace 0 (manual runs) it is written off at once."""
     t0 = time.monotonic()
     rize_by_chain = {c.chain_id: reg.rize(c.key) for c in chains}
-    stats = {"burns_checked": 0, "mints_checked": 0, "messages": 0, "no_message": 0, "refreshed": 0}
+    stats = {"burns_checked": 0, "mints_checked": 0, "messages": 0, "no_message": 0, "refreshed": 0, "deferred": 0,
+             "dropped": 0, "purged": purge_foreign(conn)}
+    with conn.cursor() as cur:
+        cur.execute("SELECT chain_id FROM chain_state")
+        indexed = {r[0] for r in cur.fetchall()}
+    conn.rollback()
+    now = now or datetime.now(timezone.utc)
 
     def out_of_time() -> bool:
         return max_seconds is not None and time.monotonic() - t0 > max_seconds
+
+    def young(ts) -> bool:
+        return grace_minutes > 0 and ts is not None and (now - ts).total_seconds() < grace_minutes * 60
+
+    def store(msgs, from_mint: bool) -> int:
+        kept = 0
+        for m in msgs:
+            try:
+                row = parse_message(m, rize_by_chain)
+                if from_mint and row["amount"] is None and row["source_chain_id"] in indexed:
+                    stats["dropped"] += 1                            # a batch partner of another token: not ours
+                    continue
+                save_message(conn, row)
+                kept += 1
+            except Exception as e:  # noqa: BLE001 - one odd message must not stop the run
+                conn.rollback()
+                log(f"[ccip] message {m.get('messageId')} skipped: {type(e).__name__}: {e}")
+        return kept
+
+    def mark(chain_id: int, txh: bytes, found: bool) -> None:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO ccip_checked (chain_id, tx_hash, found) VALUES (%s,%s,%s) "
+                        "ON CONFLICT (chain_id, tx_hash) DO UPDATE SET found = EXCLUDED.found, checked_at = now()",
+                        (chain_id, psycopg2.Binary(txh), found))
 
     for mid in open_messages(conn, limit):                       # messages still on their way: ask again by id
         if out_of_time():
@@ -173,50 +222,42 @@ def ccip_sync(conn, chains, reg: Registry, *, limit: int = 300, max_seconds: flo
             stats["refreshed"] += 1
         time.sleep(pause)
     for c in chains:
-        for txh, block in burns_to_check(conn, c.chain_id, limit):
+        for txh, block, ts in burns_to_check(conn, c.chain_id, limit):
             if out_of_time():
                 log(f"[ccip] time budget reached; the rest is resumed at the next run")
                 return stats
             q = urllib.parse.urlencode({"sourceTransactionHash": "0x" + txh.hex(), "limit": 5})
             data = fetch(f"{API}/messages?{q}")
             msgs = (data or {}).get("data") or []
-            for m in msgs:
-                try:
-                    save_message(conn, parse_message(m, rize_by_chain))
-                except Exception as e:  # noqa: BLE001 - one odd message must not stop the run
-                    conn.rollback()
-                    log(f"[ccip] message {m.get('messageId')} skipped: {type(e).__name__}: {e}")
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO ccip_checked (chain_id, tx_hash, found) VALUES (%s,%s,%s) "
-                            "ON CONFLICT (chain_id, tx_hash) DO UPDATE SET found = EXCLUDED.found, checked_at = now()",
-                            (c.chain_id, psycopg2.Binary(txh), bool(msgs)))
+            kept = store(msgs, from_mint=False)
+            if not msgs and young(ts):
+                stats["deferred"] += 1
+                conn.commit()
+                continue
+            mark(c.chain_id, txh, bool(msgs))
             conn.commit()
             stats["burns_checked"] += 1
-            stats["messages"] += len(msgs)
+            stats["messages"] += kept
             stats["no_message"] += 0 if msgs else 1
             time.sleep(pause)
-    for c in chains:                                              # deliveries nobody burned for on our chains (other networks)
-        for txh, block in mints_to_check(conn, c.chain_id, limit):
+    for c in chains:                                              # deliveries not fully explained by the messages we know
+        for txh, block, ts in mints_to_check(conn, c.chain_id, limit):
             if out_of_time():
                 log(f"[ccip] time budget reached; the rest is resumed at the next run")
                 return stats
-            q = urllib.parse.urlencode({"q": "0x" + txh.hex(), "limit": 5})
+            q = urllib.parse.urlencode({"q": "0x" + txh.hex(), "limit": 100})
             data = fetch(f"{API}/messages?{q}")
             msgs = [m for m in ((data or {}).get("data") or [])
                     if (m.get("receiptTransactionHash") or "").lower() == "0x" + txh.hex()]
-            for m in msgs:
-                try:
-                    save_message(conn, parse_message(m, rize_by_chain))
-                except Exception as e:  # noqa: BLE001
-                    conn.rollback()
-                    log(f"[ccip] message {m.get('messageId')} skipped: {type(e).__name__}: {e}")
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO ccip_checked (chain_id, tx_hash, found) VALUES (%s,%s,%s) "
-                            "ON CONFLICT (chain_id, tx_hash) DO UPDATE SET found = EXCLUDED.found, checked_at = now()",
-                            (c.chain_id, psycopg2.Binary(txh), bool(msgs)))
+            kept = store(msgs, from_mint=True)
+            if not msgs and young(ts):
+                stats["deferred"] += 1
+                conn.commit()
+                continue
+            mark(c.chain_id, txh, bool(msgs))
             conn.commit()
             stats["mints_checked"] += 1
-            stats["messages"] += len(msgs)
+            stats["messages"] += kept
             stats["no_message"] += 0 if msgs else 1
             time.sleep(pause)
     log(f"[ccip] {stats}")
@@ -263,15 +304,21 @@ def dataset_summary(conn, log=print) -> dict:
     return out
 
 
-def bridge_report(conn) -> dict:
+def bridge_report(conn, *, since=None, cutoffs=None, quiet=False) -> dict:
     """Does every burn have its CCIP message and its mint? Reads only the database.
 
     One transaction can carry several messages (CCIP executes them in a batch): then the mint is the SUM of the
     messages that share the transaction, so each side is compared with the message amount OR with that sum.
     A network we do not index (Canton) can only be checked on the side we see, and its message may carry no amount.
     A transaction that is not in our transfers table at all cannot be checked either: it is counted apart
-    ("not_in_transfers"), because that is a gap in the data, not a wrong amount."""
-    dataset_summary(conn)
+    ("not_in_transfers"), because that is a gap in the data, not a wrong amount.
+
+    since:   messages sent at or after this instant are the ones that must be clean ("blocking"); older ones are only counted.
+    cutoffs: {chain_id: block time we synced to}. A transaction after that time cannot be in our transfers yet: it is "ahead of
+             the sync" and is not an anomaly."""
+    cutoffs = cutoffs or {}
+    if not quiet:
+        dataset_summary(conn)
     with conn.cursor() as cur:
         cur.execute("""
           SELECT encode(m.message_id,'hex'), m.status, m.source_chain_id, m.dest_chain_id, encode(m.source_tx,'hex'),
@@ -286,7 +333,7 @@ def bridge_report(conn) -> dict:
                     AND g.dest_tx = m.dest_tx) AS dst_group,
                  (SELECT count(*) FROM transfers t WHERE t.chain_id = m.source_chain_id AND t.tx_hash = m.source_tx) AS src_rows,
                  (SELECT count(*) FROM transfers t WHERE t.chain_id = m.dest_chain_id AND t.tx_hash = m.dest_tx) AS dst_rows,
-                 m.sent_at
+                 m.sent_at, m.received_at
             FROM ccip_messages m ORDER BY m.sent_at DESC NULLS LAST""", {"z": bytes(20)})
         rows = cur.fetchall()
         cur.execute("""SELECT c.chain_id, count(*) FROM ccip_checked c WHERE NOT c.found GROUP BY c.chain_id""")
@@ -294,14 +341,21 @@ def bridge_report(conn) -> dict:
         cur.execute("SELECT chain_id FROM chain_state")
         indexed = {r[0] for r in cur.fetchall()}
     conn.rollback()
-    matched = pending = outside = 0
+    matched = pending = outside = ahead = blocking = 0
     reasons: dict[str, int] = {}
     samples: dict[str, list[str]] = {}
 
     by_month: dict[str, dict[str, int]] = {}
+    flagged: list[dict] = []
 
     def flag(reason, mid, src, dst, stx, dtx, amount, burned, minted, sent):
+        nonlocal blocking
         reasons[reason] = reasons.get(reason, 0) + 1
+        flagged.append({"reason": reason, "message": "0x" + mid, "source": src, "dest": dst, "sent": sent, "amount": amount,
+                        "burned": burned, "minted": minted, "send_tx": ("0x" + stx) if stx else None,
+                        "receive_tx": ("0x" + dtx) if dtx else None})
+        if since is None or (sent is not None and sent >= since):
+            blocking += 1
         month = sent.strftime("%Y-%m") if sent else "?"
         by_month.setdefault(reason, {})[month] = by_month.setdefault(reason, {}).get(month, 0) + 1
         got = samples.setdefault(reason, [])
@@ -309,7 +363,7 @@ def bridge_report(conn) -> dict:
             got.append(f"  [{reason}] message 0x{mid}  {src}->{dst}  sent {sent}  ccip {amount}  burned {burned}  minted {minted}\n"
                        f"      send tx {('0x' + stx) if stx else None}\n      receive tx {('0x' + dtx) if dtx else None}")
 
-    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group, src_rows, dst_rows, sent in rows:
+    for mid, status, src, dst, stx, dtx, amount, burned, minted, src_group, dst_group, src_rows, dst_rows, sent, received in rows:
         if status != "SUCCESS":
             pending += 1
             continue
@@ -327,6 +381,14 @@ def bridge_report(conn) -> dict:
             return "above" if moved > max(amount or 0, group or 0) else "below"
         s_state = side(src_rows, burned, src_group, src in indexed)
         d_state = side(dst_rows, minted, dst_group, dst in indexed)
+        # a transaction later than the block we synced to cannot be in our transfers yet: wait for the next run
+        if s_state == "absent" and sent is not None and sent > cutoffs.get(src, datetime.max.replace(tzinfo=timezone.utc)):
+            s_state = "ahead"
+        if d_state == "absent" and received is not None and received > cutoffs.get(dst, datetime.max.replace(tzinfo=timezone.utc)):
+            d_state = "ahead"
+        if "ahead" in (s_state, d_state):
+            ahead += 1
+            continue
         bad = [(n, st) for n, st in (("burn", s_state), ("mint", d_state)) if st in ("none", "above", "below")]
         absent = [n for n, st in (("source", s_state), ("dest", d_state)) if st == "absent"]
         if bad:
@@ -340,7 +402,7 @@ def bridge_report(conn) -> dict:
                 outside += 1
         else:
             matched += 1
-    for reason, lines in samples.items():
+    for reason, lines in (samples.items() if not quiet else ()):
         print(f"--- {reasons[reason]} x {reason}  (per month: "
               + ", ".join(f"{m}: {n}" for m, n in sorted(by_month[reason].items())) + ")", flush=True)
         for line in lines:
@@ -348,7 +410,9 @@ def bridge_report(conn) -> dict:
     mismatch = sum(n for r, n in reasons.items() if not r.startswith("not_in_transfers"))
     gaps = sum(n for r, n in reasons.items() if r.startswith("not_in_transfers"))
     return {"messages": len(rows), "matched": matched, "pending_or_failed": pending, "mismatch": mismatch,
-            "not_in_transfers": gaps, "one_side_only_other_network": outside, "no_message_found": no_msg, "reasons": reasons}
+            "not_in_transfers": gaps, "one_side_only_other_network": outside, "no_message_found": no_msg, "reasons": reasons,
+            "ahead_of_sync": ahead, "blocking": blocking, "samples": {r: list(v) for r, v in samples.items()},
+            "flagged": flagged}
 
 
 def gap_candidates(conn) -> list[dict]:
@@ -422,3 +486,14 @@ def gap_check(conn, clients: dict, reg: Registry, *, limit: int = 20, log=print)
         log(f"[gaps] chain {cid}: holes seen at blocks {sorted(blocks)}")
     log(f"[gaps] verdicts: {verdicts}")
     return {"candidates": len(cands), "checked": len(sample), "verdicts": verdicts, "holes": holes}
+
+
+def ccip_backlog(conn, chains, grace_minutes: float, now=None) -> int:
+    """Burns / mints old enough to have a CCIP message that still were not looked up: the CCIP step is not finished."""
+    now = now or datetime.now(timezone.utc)
+    n = 0
+    for c in chains:
+        for _txh, _block, ts in burns_to_check(conn, c.chain_id, 50) + mints_to_check(conn, c.chain_id, 50):
+            if ts is None or (now - ts).total_seconds() >= grace_minutes * 60:
+                n += 1
+    return n
