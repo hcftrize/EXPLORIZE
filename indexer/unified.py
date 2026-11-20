@@ -10,7 +10,7 @@ What BLOCKS the publication (alignment only: no tab may run ahead of, or behind,
   - trades / liquidity moves are not computed up to the same block as the transfers
   - CCIP: a burn or mint old enough to have a message was not looked up yet (in-flight messages, or transactions beyond the synced
     block, are NOT a problem)
-  - the balances / the top holders are not written for the same blocks (balances are read at exactly the synced block of each chain)
+  - the balances (and, when it is rebuilt, the top holders) are not written for the same blocks (balances are read at exactly the synced block of each chain)
   - an RPC error, a crash, a kill: nothing half-done is ever published
 
 What only WRITES AN ANOMALY (anomalies/ANOMALIES.txt, each one once, grouped by day) and the data is published anyway
@@ -24,8 +24,11 @@ Order of the run
   2. supply check   supply rebuilt from our transfers vs totalSupply() on chain, per chain, at the synced block   (anomaly)
   3. market layer   trades and liquidity moves for the new transactions, crashed transactions retried, pool photos (hourly)
   4. CCIP           new burns / mints / in-flight messages asked to the Chainlink API, then every message reconciled
-  5. balances       live balanceOf() at the synced block of every address touched since the last run (kept in holder_balances)
-  6. top holders    ranking = balances + governance bonds (Base), written to holders / bonds for the same Base block
+  5. balances       live balanceOf() at the synced block of every address touched since the last run (kept in holder_balances,
+                    not displayed: cheap, and it keeps the "balances add up to totalSupply" check running at every run)
+  6. top holders    ONCE A DAY (RANKING_EVERY_HOURS, 24 by default; always on the very first run): governance read + ranking =
+                    balances + bonds (Base), written to holders / bonds for the same Base block as everything else. The other runs
+                    keep the published table untouched, with its own date ("updated Xh ago")
   7. checks         alignment of every table, then the run is recorded and published
 
 Not in this run: the very first backfill of a chain, and a long catch-up after days offline. Those keep their own commands
@@ -35,6 +38,7 @@ Not in this run: the very first backfill of a chain, and a long catch-up after d
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 
@@ -51,6 +55,9 @@ ZERO = bytes(20)
 ADVISORY_KEY = 7_390_001           # one unified run at a time
 CCIP_GRACE_MINUTES = 15            # a burn / mint without CCIP message yet is asked again for this long before it is written off
 SUPPLY_SELECTOR = "0x18160ddd"
+# The Top Holders table (held + bonded + governance) is rebuilt at most this often. Between two rebuilds the page keeps the previous
+# table, with its own date and block ("updated Xh ago"). Override with the RANKING_EVERY_HOURS environment variable (0 = every run).
+RANKING_EVERY_HOURS = 24.0
 
 
 MAX_ANOMALIES_PER_KIND = 500
@@ -171,7 +178,7 @@ def update_ranking(conn, clients, chains: dict[str, config.Chain], balances: dic
 
 
 # ------------------------------------------------------------------------------------------------ checks
-def structural_checks(conn, chains: dict[str, config.Chain], targets: dict, balances: dict, started) -> list[str]:
+def structural_checks(conn, chains: dict[str, config.Chain], targets: dict, balances: dict, started, ranking_done: bool = True) -> list[str]:
     """What must agree across tabs. Returns the list of problems (empty = consistent)."""
     problems = []
     with conn.cursor() as cur:
@@ -190,12 +197,40 @@ def structural_checks(conn, chains: dict[str, config.Chain], targets: dict, bala
             cur.execute("SELECT count(*) FROM trades x WHERE x.chain_id = %s AND x.block_number > %s", (chain.chain_id, t))
             if cur.fetchone()[0]:
                 problems.append(f"{key}: trades exist beyond the synced block {t}")
-        cur.execute("SELECT base_block FROM holders_meta WHERE id = 1")
-        m = cur.fetchone()
-        if m is None or m[0] != balances["base"]["block"]:
-            problems.append("top holders were not written for the validated Base block")
+        if ranking_done:
+            cur.execute("SELECT base_block FROM holders_meta WHERE id = 1")
+            m = cur.fetchone()
+            if m is None or m[0] != balances["base"]["block"]:
+                problems.append("top holders were not written for the validated Base block")
     conn.commit()
     return problems
+
+
+def ranking_age_hours(conn, now: datetime) -> float | None:
+    """Age of the published Top Holders table in hours (None = no table yet)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT updated_at FROM holders_meta WHERE id = 1")
+        row = cur.fetchone()
+    conn.commit()
+    return (now - row[0]).total_seconds() / 3600 if row else None
+
+
+def ranking_due(conn, chains: dict[str, config.Chain], now: datetime, every_hours: float) -> tuple[bool, str]:
+    """Is it time to rebuild the Top Holders table (governance read + ranking)? Yes when there is none, when the balances were never
+    seeded (first run), or when the published one is older than `every_hours`."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM chain_state WHERE chain_id = ANY(%s) AND balances_block IS NULL",
+                    ([c.chain_id for c in chains.values()],))
+        unseeded = cur.fetchone()[0]
+    conn.commit()
+    age = ranking_age_hours(conn, now)
+    if age is None:
+        return True, "no Top Holders table yet"
+    if unseeded:
+        return True, "first run: balances are read for the first time"
+    if age >= every_hours:
+        return True, f"the published table is {age:.1f} h old (limit {every_hours:g} h)"
+    return False, f"the published table is {age:.1f} h old (rebuilt every {every_hours:g} h)"
 
 
 def last_ok_start(conn) -> datetime | None:
@@ -230,7 +265,8 @@ def _amount(raw) -> str:
 
 
 def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Registry, *, max_seconds: float = 1500.0,
-                log=print, ccip_fetch=None, anomalies: list | None = None) -> dict:
+                log=print, ccip_fetch=None, anomalies: list | None = None,
+                ranking_every_hours: float | None = None) -> dict:
     """Do everything on `conn` (a StagedConnection) and return the summary. Raises RunFailed if the data cannot be aligned to one
     block; the caller publishes (commit) only when this returns without an exception. `anomalies` (a list the caller owns) receives
     (key, kind, detail) for everything that must be looked at by a human but does not stop the publication."""
@@ -359,7 +395,7 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
                        "ahead_of_sync": rep["ahead_of_sync"], "anomalies": len(rep["flagged"]), "backlog": backlog}
     stop()
 
-    # 5. balances and 6. top holders (the same blocks as the transfers) --------------------------------------------
+    # 5. balances: every run, cheap (only the addresses that moved); stored, not displayed ------------------------------
     balances = update_balances(conn, clients, chains, targets, log, extra=pre_touched)
     summary["balances"] = {k: {"block": v["block"], "holders": v["holders"], "read": v["read"], "seeded": v["seeded"]}
                            for k, v in balances.items()}
@@ -368,14 +404,24 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
             anoms.append((f"balances:{key}:{v['sum'] - v['supply']}", f"balances / {key}",
                           f"block {v['block']:,}: the balances read add up to {_amount(v['sum'])} RIZE, totalSupply() says "
                           f"{_amount(v['supply'])} (difference {_amount(v['sum'] - v['supply'])})"))
-    summary["holders"] = update_ranking(conn, clients, chains, balances, log)
-    if summary["holders"]["governance_diff"] != 0:
-        d = summary["holders"]["governance_diff"]
-        anoms.append((f"governance:{d}", "governance", f"Base block {summary['holders']['base_block']:,}: bonds vs contract balance "
-                                                       f"differ by {_amount(d)} RIZE"))
+
+    # 6. Top Holders table (governance read + ranking): only when the published one is older than the window -------------
+    every = ranking_every_hours if ranking_every_hours is not None else float(os.environ.get("RANKING_EVERY_HOURS") or RANKING_EVERY_HOURS)
+    due, why = ranking_due(conn, chains, tx_now, every)
+    if due:
+        log(f"Top Holders table: rebuilt in this run ({why})")
+        summary["holders"] = update_ranking(conn, clients, chains, balances, log)
+        summary["holders"]["rebuilt"] = True
+        if summary["holders"]["governance_diff"] != 0:
+            d = summary["holders"]["governance_diff"]
+            anoms.append((f"governance:{d}", "governance", f"Base block {summary['holders']['base_block']:,}: bonds vs contract balance "
+                                                           f"differ by {_amount(d)} RIZE"))
+    else:
+        log(f"Top Holders table: kept as published ({why})")
+        summary["holders"] = {"rebuilt": False, "reason": why}
 
     # 7. alignment checks, record, done -------------------------------------------------------------------------------
-    for text in structural_checks(conn, chains, targets, balances, tx_now):
+    for text in structural_checks(conn, chains, targets, balances, tx_now, ranking_done=due):
         block("alignment", text)
     stop()
     summary["anomalies"] = len(anoms)
