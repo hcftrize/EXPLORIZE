@@ -16,6 +16,7 @@ be guessed from the flows goes to `enrich_review`, never to the trades table.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -31,8 +32,9 @@ from .venues import decode_venues, refine
 ENTRYPOINTS = {"0x0000000071727de22e5e9d8baf0edac6f37da032", "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789"}
 WINDOW_BLOCKS = {"base": 20000, "ethereum": 5000, "bsc": 50000, "polygon": 20000}
 # Stop before the plan's storage limit is reached (the Neon free plan: 1 GB). On a paid plan (no storage limit) set the repository
-# variable STORAGE_LIMIT_MB (Settings > Secrets and variables > Actions > Variables) to a high value such as 50000.
+# variable STORAGE_LIMIT_MB (Settings > Secrets and variables > Actions > Variables). The workflows default to 4500 (5 GB plan).
 STORAGE_LIMIT_MB = config.env_int("STORAGE_LIMIT_MB", 900)
+STORAGE_LIMIT_SOURCE = "set by the STORAGE_LIMIT_MB variable" if os.environ.get("STORAGE_LIMIT_MB") else "built-in default: STORAGE_LIMIT_MB is not set"
 RECEIPT_CHUNK = 60                # transactions fetched per round
 
 
@@ -479,7 +481,7 @@ def enrich_chain(chain, client, conn, reg: Registry, *, max_seconds: float | Non
             log(f"[{chain.key}] time budget reached; progress saved at block {lo - 1}")
             break
         if db_size_mb(conn) > STORAGE_LIMIT_MB:
-            log(f"[{chain.key}] STOP: the database is above {STORAGE_LIMIT_MB} MB; nothing more is written")
+            log(f"[{chain.key}] STOP: the database is above {STORAGE_LIMIT_MB} MB ({STORAGE_LIMIT_SOURCE}); nothing more is written")
             break
         hi = min(lo + window - 1, synced)
         txs = txs_in_window(conn, chain.chain_id, lo, hi, holders)
@@ -536,7 +538,7 @@ def report(conn, log=print) -> None:
     with conn.cursor() as cur:
         cur.execute("SELECT pg_size_pretty(pg_database_size(current_database())), pg_database_size(current_database())/1048576")
         pretty, mb = cur.fetchone()
-        log(f"DATABASE SIZE: {pretty} ({int(mb)} MB). The enrichment stops by itself above {STORAGE_LIMIT_MB} MB.")
+        log(f"DATABASE SIZE: {pretty} ({int(mb)} MB). The enrichment stops by itself above {STORAGE_LIMIT_MB} MB ({STORAGE_LIMIT_SOURCE}).")
         cur.execute("""SELECT relname, pg_size_pretty(pg_total_relation_size(c.oid)) FROM pg_class c
                          JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r'
                          ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 12""")
