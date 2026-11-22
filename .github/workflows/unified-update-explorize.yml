@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       max_minutes:
-        description: "Give up (nothing published) after this many minutes"
+        description: "Give up (nothing published) after this many minutes (the very first run needs about 60)"
         default: "25"
 
 concurrency:
@@ -27,12 +27,13 @@ permissions:
 jobs:
   unified:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
       MAX_MINUTES: ${{ inputs.max_minutes }}
       RPC_BATCH_SIZE: "10"
+      STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '900' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
