@@ -46,6 +46,7 @@ jobs:
       REBUILD: ${{ inputs.rebuild }}
       LIMIT: ${{ inputs.limit }}
       RPC_BATCH_SIZE: "10"
+      STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '900' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
