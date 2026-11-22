@@ -30,7 +30,9 @@ from .venues import decode_venues, refine
 
 ENTRYPOINTS = {"0x0000000071727de22e5e9d8baf0edac6f37da032", "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789"}
 WINDOW_BLOCKS = {"base": 20000, "ethereum": 5000, "bsc": 50000, "polygon": 20000}
-STORAGE_LIMIT_MB = 900            # stop before the free plan's 1 GB is reached
+# Stop before the plan's storage limit is reached (the Neon free plan: 1 GB). On a paid plan (no storage limit) set the repository
+# variable STORAGE_LIMIT_MB (Settings > Secrets and variables > Actions > Variables) to a high value such as 50000.
+STORAGE_LIMIT_MB = config.env_int("STORAGE_LIMIT_MB", 900)
 RECEIPT_CHUNK = 60                # transactions fetched per round
 
 
