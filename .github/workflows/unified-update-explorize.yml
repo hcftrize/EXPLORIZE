@@ -33,7 +33,7 @@ jobs:
       DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
       MAX_MINUTES: ${{ inputs.max_minutes }}
       RPC_BATCH_SIZE: "10"
-      STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '900' }}
+      STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '4500' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
