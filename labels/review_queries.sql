@@ -1,0 +1,85 @@
+-- EXPLORIZE: review queries for the Neon SQL editor (read-only). Run them one at a time.
+-- Addresses come out as 0x... text; chain_id: 8453 Base, 1 Ethereum, 56 BSC, 137 Polygon.
+-- Typical use: find what is unknown (A-F), label it in labels/*.json, then fix the past with the "Explorize fix labels" workflow.
+
+-- A1. Addresses that move the most RIZE, with no label (last 90 days; shorten the interval if the editor times out)
+SELECT '0x' || encode(x.a, 'hex') AS address, x.chain_id, count(*) AS transfers, round(sum(x.amount) / 1e18) AS rize_moved
+  FROM (SELECT chain_id, from_addr AS a, amount FROM transfers WHERE block_time > now() - interval '90 days'
+        UNION ALL
+        SELECT chain_id, to_addr, amount FROM transfers WHERE block_time > now() - interval '90 days') x
+ WHERE x.a <> '\x0000000000000000000000000000000000000000'
+   AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.address = x.a AND l.chain_id IN (0, x.chain_id))
+   AND NOT EXISTS (SELECT 1 FROM pools p WHERE p.pool_key = x.a AND p.chain_id = x.chain_id)
+ GROUP BY x.a, x.chain_id ORDER BY rize_moved DESC LIMIT 100;
+
+-- A2. The biggest holders today with no label (balances read on chain at the last published block)
+SELECT '0x' || encode(b.addr, 'hex') AS address, b.chain_id, round(b.balance / 1e18) AS rize_held
+  FROM holder_balances b
+ WHERE b.balance > 0
+   AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.address = b.addr AND l.chain_id IN (0, b.chain_id))
+   AND NOT EXISTS (SELECT 1 FROM pools p WHERE p.pool_key = b.addr AND p.chain_id = b.chain_id)
+ ORDER BY b.balance DESC LIMIT 100;
+
+-- B1. Routers, relayers and signers of trades with no label
+SELECT '0x' || encode(x.a, 'hex') AS address, x.chain_id, x.role, count(*) AS trades, round(sum(x.rize) / 1e18) AS rize
+  FROM (SELECT chain_id, router AS a, 'router' AS role, rize FROM trades WHERE router IS NOT NULL
+        UNION ALL SELECT chain_id, sender, 'sender', rize FROM trades WHERE sender IS NOT NULL AND sender <> trader) x
+ WHERE NOT EXISTS (SELECT 1 FROM labels l WHERE l.address = x.a AND l.chain_id IN (0, x.chain_id))
+ GROUP BY x.a, x.chain_id, x.role ORDER BY rize DESC LIMIT 100;
+
+-- B2. Traders with no label, by RIZE traded (the big ones: market makers, bots, funds)
+SELECT '0x' || encode(t.trader, 'hex') AS address, t.chain_id, count(*) AS trades, round(sum(t.rize) / 1e18) AS rize,
+       round(sum(coalesce(t.usd, 0))) AS usd
+  FROM trades t
+ WHERE t.trader IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.address = t.trader AND l.chain_id IN (0, t.chain_id))
+ GROUP BY t.trader, t.chain_id ORDER BY rize DESC LIMIT 100;
+
+-- B3. Liquidity providers with no label
+SELECT '0x' || encode(e.provider, 'hex') AS address, e.chain_id, count(*) AS moves, round(sum(abs(e.rize)) / 1e18) AS rize
+  FROM liquidity_events e
+ WHERE e.provider IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM labels l WHERE l.address = e.provider AND l.chain_id IN (0, e.chain_id))
+ GROUP BY e.provider, e.chain_id ORDER BY rize DESC NULLS LAST LIMIT 100;
+
+-- C1. What waits for review, by reason (guess | flag | unknown_pool | crash)
+SELECT chain_id, reason, verdict, count(*) FROM enrich_review GROUP BY 1, 2, 3 ORDER BY 4 DESC;
+
+-- C2. The same, by explanation (to see patterns)
+SELECT chain_id, reason, left(detail, 110) AS detail, count(*) FROM enrich_review GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 40;
+
+-- D1. Unknown pools: the identifier to put in labels/pools.json, and how many transactions wait on it
+--     (the 18 first characters are enough for the --pool field of the fix workflow)
+SELECT chain_id, substring(detail from 'unknown_pool_id:[0-9a-fx]+') AS pool, count(*) AS transactions, round(sum(rize) / 1e18) AS rize
+  FROM enrich_review
+ WHERE reason = 'unknown_pool' OR detail LIKE '%unknown_pool_id%'
+ GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 50;
+
+-- D2. Pools found by the code itself and still unnamed (POOL UNKNW n): name them in labels/pools.json
+SELECT p.chain_id, '0x' || encode(p.pool_key, 'hex') AS pool, p.name, p.venue, p.kind, p.updated_at
+  FROM pools p WHERE p.source = 'auto' OR p.name LIKE 'POOL UNKNW%' ORDER BY p.chain_id, p.updated_at;
+
+-- E1. Transactions whose venue had to be guessed, newest first
+SELECT chain_id, '0x' || encode(tx_hash, 'hex') AS tx, block_number, reason, verdict, left(detail, 90) AS detail, seen_at
+  FROM enrich_review WHERE reason = 'guess' ORDER BY seen_at DESC LIMIT 100;
+
+-- E2. Crashed transactions (the next unified run retries them by itself)
+SELECT chain_id, '0x' || encode(tx_hash, 'hex') AS tx, left(detail, 120) AS detail, seen_at
+  FROM enrich_review WHERE reason = 'crash' ORDER BY seen_at DESC LIMIT 50;
+
+-- F1. Trades with an implausible price
+SELECT chain_id, '0x' || encode(tx_hash, 'hex') AS tx, block_time, side, rize / 1e18 AS rize, usd, price_usd, flags
+  FROM trades WHERE 'price-implausible' = ANY(flags) ORDER BY block_time DESC LIMIT 100;
+
+-- F2. Trades by flag (how many of each)
+SELECT chain_id, unnest(flags) AS flag, count(*) FROM trades GROUP BY 1, 2 ORDER BY 3 DESC;
+
+-- G. One transaction in detail: what we stored about it (replace the hash; 0x is fine)
+SELECT 'trade' AS what, side, '0x' || encode(trader, 'hex') AS trader, '0x' || encode(router, 'hex') AS router, rize / 1e18 AS rize, usd, flags::text AS note
+  FROM trades WHERE tx_hash = decode(substr('0xPUT_THE_HASH_HERE', 3), 'hex')
+UNION ALL
+SELECT 'review', verdict, reason, NULL, rize / 1e18, NULL, detail
+  FROM enrich_review WHERE tx_hash = decode(substr('0xPUT_THE_HASH_HERE', 3), 'hex')
+UNION ALL
+SELECT 'liquidity', kind, '0x' || encode(pool_key, 'hex'), '0x' || encode(provider, 'hex'), rize / 1e18, NULL, NULL
+  FROM liquidity_events WHERE tx_hash = decode(substr('0xPUT_THE_HASH_HERE', 3), 'hex');
