@@ -103,7 +103,7 @@ def run_unified_command(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
     p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "inspect", "balance", "status",
-                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report", "unified"])
+                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report", "unified"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
@@ -113,11 +113,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-block", type=int, default=None, help="inspect: first block")
     p.add_argument("--to-block", type=int, default=None, help="inspect: last block")
     p.add_argument("--receipts", type=int, default=0, help="inspect: show the token logs of the first N transactions")
-    p.add_argument("--address", default=None, help="balance: wallet address")
+    p.add_argument("--address", default=None, help="balance: wallet address; reprocess: addresses (comma-separated)")
     p.add_argument("--blocks", default=None, help="balance: comma-separated block numbers")
     p.add_argument("--rebuild", action="store_true", help="enrich: forget the trades / liquidity moves of the chain and recompute them")
     p.add_argument("--limit", type=int, default=300, help="ccip: burn transactions to look up per chain in one run")
     p.add_argument("--discover-top", type=int, default=60, help="discover: how many of the busiest addresses to test")
+    p.add_argument("--reasons", default=None, help="reprocess: review reasons to re-read (unknown_pool,guess,flag,crash; none = skip)")
+    p.add_argument("--pool", default=None, help="reprocess: pool address or pool id (comma-separated)")
+    p.add_argument("--flags", default=None, help="reprocess: trade flags to re-read (comma-separated, e.g. price-implausible)")
+    p.add_argument("--tx", default=None, help="reprocess: transaction hashes (comma-separated, or 'chain hash' one per line)")
+    p.add_argument("--tx-file", default=None, help="reprocess: text file with one transaction per line")
+    p.add_argument("--dry-run", action="store_true", help="reprocess: only say what would be re-read")
     args = p.parse_args(argv)
     chains = config.select_chains(args.chain)
     ok = True
@@ -143,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     budget = args.max_minutes * 60 if args.max_minutes else None
     t_start = time.monotonic()
     reg = None
-    if args.command in ("enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "report"):
+    if args.command in ("enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report"):
         db.init_schema(conn)                                  # idempotent: creates the market tables on first use
         db.ensure_chains(conn, chains)
         reg = Registry.from_dir()
@@ -161,9 +167,17 @@ def main(argv: list[str] | None = None) -> int:
         ccip_sync(conn, chains, reg, limit=args.limit, max_seconds=budget, log=log)
         log(f"bridge report: {bridge_report(conn)}")
         return 0
+    selection = None
+    if args.command == "reprocess":
+        from .reprocess import build_selection
+        selection = build_selection(args.reasons, args.pool, args.address, args.flags, args.tx, args.tx_file)
+        if selection.empty():
+            raise SystemExit("reprocess: nothing selected (give --reasons, --pool, --address, --flags, --tx or --tx-file)")
+        log(f"reprocess: reasons={list(selection.reasons)} pools={list(selection.pools)} addresses={list(selection.addresses)} "
+            f"flags={list(selection.flags)} listed transactions={len(selection.txs)}{' (dry run)' if args.dry_run else ''}")
     for c in chains:
         try:
-            client = make_client(c)
+            client = None if (args.command == "reprocess" and args.dry_run) else make_client(c)     # a dry run never calls the node
             if args.command == "find-start":
                 db.ensure_chains(conn, [c])
                 db.set_start_block(conn, c.chain_id, find_start_block(client, c, client.block_number(), log))
@@ -198,11 +212,15 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "repair":
                 left = None if budget is None else max(budget - (time.monotonic() - t_start), 1.0)
                 enrich_mod.repair_traders(c, client, conn, reg, max_seconds=left, log=log)
+            elif args.command == "reprocess":
+                from .reprocess import reprocess_chain
+                left = None if budget is None else max(budget - (time.monotonic() - t_start), 1.0)
+                reprocess_chain(c, client, conn, reg, selection, dry_run=args.dry_run, max_seconds=left, log=log)
             elif args.command == "snapshot":
                 enrich_mod.snapshot(c, client, conn, reg, log=log)
             elif args.command == "discover":
                 enrich_mod.discover(client, conn, c, reg, args.discover_top, log)
-        except (RpcError, SystemExit, psycopg2.Error, DataError) as e:
+        except (RpcError, SystemExit, psycopg2.Error, DataError, RuntimeError) as e:
             # one failing chain must not block the others; the exit code reports it
             conn.rollback()
             log(f"[{c.key}] FAILED: {type(e).__name__}: {e}")
