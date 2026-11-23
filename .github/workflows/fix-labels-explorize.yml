@@ -1,0 +1,83 @@
+name: Explorize fix labels
+
+# Corrects the PAST after you changed labels: re-reads ONLY the transactions you point at and rewrites their trades, liquidity
+# moves and review rows with the same code as the enrichment. Everything else is left alone.
+#
+# Order of work: 1) edit labels/entities.json, labels/pools.json (and corrections/transactions.txt for special cases) and merge
+# into main  2) run this workflow once with "dry_run" ticked: it says how many transactions would be re-read  3) run it again
+# without dry_run.  Names alone (entities, pool names, venues) need NO correction: they show up at the next unified run.
+#
+# Selectors add up. Leave a field empty to skip it. Not scheduled; it never blocks the unified run: each batch is written
+# under the unified run's lock (it waits for a unified run in progress, then writes for a fraction of a second).
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "all, base, ethereum, bsc or polygon"
+        default: all
+      reasons:
+        description: "Review queue to re-read: unknown_pool, guess, flag, crash (comma-separated). 'none' = skip. Empty = skip"
+        default: "unknown_pool,guess,flag"
+      pools:
+        description: "Pools just added to labels/pools.json: address or pool id (comma-separated; the 18 first characters of an id are enough)"
+        default: ""
+      addresses:
+        description: "Routers / relayers / signers just labeled: addresses (comma-separated). Re-reads the trades they appear in"
+        default: ""
+      flags:
+        description: "Trades carrying these flags (comma-separated), e.g. price-implausible"
+        default: ""
+      txs:
+        description: "Special cases: transaction hashes (comma-separated)"
+        default: ""
+      use_file:
+        description: "Also re-read the transactions listed in corrections/transactions.txt"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Only say what would be re-read (nothing is read from the node, nothing is written)"
+        type: boolean
+        default: true
+      max_minutes:
+        description: "Stop cleanly after this many minutes (progress is saved; run it again to continue)"
+        default: "120"
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 140
+    concurrency:
+      group: explorize-fix-labels
+      cancel-in-progress: false
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DRPC_API_KEY: ${{ secrets.DRPC_API_KEY }}
+      CHAIN: ${{ inputs.chain }}
+      REASONS: ${{ inputs.reasons }}
+      POOLS: ${{ inputs.pools }}
+      ADDRESSES: ${{ inputs.addresses }}
+      FLAGS: ${{ inputs.flags }}
+      TXS: ${{ inputs.txs }}
+      USE_FILE: ${{ inputs.use_file }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      MAX_MINUTES: ${{ inputs.max_minutes }}
+      RPC_BATCH_SIZE: "10"
+      STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '4500' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Re-read the selected transactions
+        run: |
+          set -e
+          ARGS=(--chain "${CHAIN:-all}" --max-minutes "${MAX_MINUTES:-120}" --reasons "${REASONS:-none}")
+          if [ -n "$POOLS" ];     then ARGS+=(--pool "$POOLS"); fi
+          if [ -n "$ADDRESSES" ]; then ARGS+=(--address "$ADDRESSES"); fi
+          if [ -n "$FLAGS" ];     then ARGS+=(--flags "$FLAGS"); fi
+          if [ -n "$TXS" ];       then ARGS+=(--tx "$TXS"); fi
+          if [ "$USE_FILE" = "true" ]; then ARGS+=(--tx-file corrections/transactions.txt); fi
+          if [ "$DRY_RUN" = "true" ];  then ARGS+=(--dry-run); fi
+          python -u -m indexer reprocess "${ARGS[@]}"
