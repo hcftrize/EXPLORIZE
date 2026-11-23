@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -412,8 +413,40 @@ def discover(client, conn, chain, reg: Registry, top: int, log) -> list[Pool]:
 
 
 # ------------------------------------------------------------------------------------------ the job
-def process_txs(chain, client, conn, reg: Registry, part, log=print):
-    """Fetch the receipts of some transactions, turn each into rows and write them (idempotent). part = [(hash, block, time)]."""
+@contextmanager
+def writer_lock(conn, key: int, log=print, wait_seconds: float = 1800.0):
+    """Hold the advisory lock of the unified run while a batch is written: a manual correction never writes the same rows as
+    a unified run at the same moment. The wait is bounded; the lock is held for the write only (a fraction of a second)."""
+    t0 = time.monotonic()
+    waited = False
+    while True:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
+            got = cur.fetchone()[0]
+        conn.commit()
+        if got:
+            break
+        if not waited:
+            log("a unified run is writing: waiting for it to finish before writing the corrections")
+            waited = True
+        if time.monotonic() - t0 > wait_seconds:
+            raise RuntimeError("the unified run did not release its lock in time; run the correction again")
+        time.sleep(3)
+    try:
+        yield
+    finally:
+        try:
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            conn.commit()
+        except psycopg2.Error:
+            conn.rollback()
+
+
+def process_txs(chain, client, conn, reg: Registry, part, log=print, lock_key: int | None = None):
+    """Fetch the receipts of some transactions, turn each into rows and write them (idempotent). part = [(hash, block, time)].
+    lock_key: take that advisory lock around the write (manual corrections use the lock of the unified run)."""
     calls = []
     for h, *_ in part:
         calls += [("eth_getTransactionReceipt", [h]), ("eth_getTransactionByHash", [h])]
@@ -433,7 +466,10 @@ def process_txs(chain, client, conn, reg: Registry, part, log=print):
         items.append((h, block, ts, b))
     if unknown:
         register_unknowns(client, conn, chain, reg, sorted(set(unknown)), log)
-    return safe_write(conn, chain.chain_id, items, log)
+    if lock_key is None:
+        return safe_write(conn, chain.chain_id, items, log)
+    with writer_lock(conn, lock_key, log):
+        return safe_write(conn, chain.chain_id, items, log)
 
 
 def repair_traders(chain, client, conn, reg: Registry, *, max_seconds: float | None = None, log=print) -> dict:
