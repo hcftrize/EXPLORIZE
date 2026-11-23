@@ -42,6 +42,7 @@ Repository secrets (**Settings > Secrets and variables > Actions**):
 | **Explorize sync** | Incremental update (default: all chains). Meant to be triggered hourly. |
 | **Explorize verify** | Supply integrity check and per-chain status. |
 | **Explorize market layer** | Turns the synced transfers into trades and liquidity moves (`enrich`), photographs the pools (`snapshot`), finds unlisted RIZE pools (`discover`) and reconciles the bridges with the Chainlink CCIP API (`ccip`). Resumable; run it as often as you like. Names and logos come from the `labels/` folder and `assets/explorize/`. |
+| **Explorize fix labels** | Corrects the past after a label change: re-reads only the transactions you point at (review queue, a new pool, a router, a flag, a list of hashes) and rewrites their trades and review rows. `dry_run` first. See `labels/WORKFLOW.md`. |
 
 ## Run locally
 
