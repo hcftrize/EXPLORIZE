@@ -1,0 +1,5 @@
+# Special cases to re-read: one transaction per line, "0x<hash>" or "<chain> 0x<hash>" (base, ethereum, bsc, polygon).
+# Anything after # is a comment. Used by the "Explorize fix labels" workflow when "use_file" is ticked.
+# Examples (remove the # to use them):
+# 0x1111111111111111111111111111111111111111111111111111111111111111
+# bsc 0x2222222222222222222222222222222222222222222222222222222222222222   # wrong trader, relayer added
