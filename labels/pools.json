@@ -1,5 +1,5 @@
 {
-  "_readme": "The RIZE trading pools. key = pool address (20 bytes) or pool id (32 bytes, Uniswap V4 / PancakeSwap Infinity). kind: v3 | v2 | v4 | infinity | rfq. Edit names freely; the code never overwrites a name you chose. Pools found automatically are added to the database as 'POOL UNKNW n' until you name them here.",
+  "_readme": "The RIZE trading pools. key = pool address (20 bytes) or pool id (32 bytes, Uniswap V4 / PancakeSwap Infinity). kind: v3 | v2 | v4 | infinity | rfq. Edit names freely; the code never overwrites a name you chose. Pools found automatically are added to the database as 'POOL UNKNW n' until you name them here. 'not_pools' lists addresses the code took for pools that are something else: they are removed from the pools and never rediscovered.",
   "pools": [
     {
       "chain": "base",
@@ -166,6 +166,146 @@
       "status": "active",
       "source": "manual",
       "note": "Infinity pool USDC/RIZE (the CLPoolManager emits the events, the Vault holds the tokens)"
+    },
+    {
+      "chain": "bsc",
+      "key": "0x42538143f90eb725ce2b36e248dbbf6dde7027fc",
+      "name": "PancakeSwap 2",
+      "venue": "pancakeswap-v3",
+      "kind": "v3",
+      "token0": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+      "token1": "0xaedaff046601beb063b647845dfb21841f32d6a4",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool USDC/RIZE (was POOL UNKNW 1)"
+    },
+    {
+      "chain": "bsc",
+      "key": "0x7f471a684bab236597d44caa32fc1afe0b262bea",
+      "name": "PancakeSwap 3",
+      "venue": "pancakeswap-v2",
+      "kind": "v2",
+      "token0": "0xa8d6737e035d4b5986a650198ce1cf5adb06f4be",
+      "token1": "0xaedaff046601beb063b647845dfb21841f32d6a4",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0xca143ce32fe78f1f7019d7d551a6402fc5350c73",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V2 pool (was POOL UNKNW 2)"
+    },
+    {
+      "chain": "base",
+      "key": "0xb408a0c772a3ffca2ea9013859de8591c2e59c47",
+      "name": "Uniswap 3",
+      "venue": "uniswap-v2",
+      "kind": "v2",
+      "token0": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "token1": "0xf0d67eee61f61a0b53361842970f6c940aeccaae",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x8909dc15e40173ff4699343b6eb8132c65e18ec6",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V2 pool (was POOL UNKNW 3)"
+    },
+    {
+      "chain": "base",
+      "key": "0x24f6dbd62978282de988cec8f3193fac4cc1f72e",
+      "name": "SushiSwap 1",
+      "venue": "sushiswap-v3",
+      "kind": "v3",
+      "token0": "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+      "token1": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0xc35dadb65012ec5796536bd9864ed8773abc74c4",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool (was POOL UNKNW 4)"
+    },
+    {
+      "chain": "base",
+      "key": "0x00372e385a0f84fe89a3e55a0ea778d35c6bf848",
+      "name": "Uniswap 4",
+      "venue": "uniswap-v3",
+      "kind": "v3",
+      "token0": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "token1": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool USDC/RIZE (was POOL UNKNW 5)"
+    },
+    {
+      "chain": "base",
+      "key": "0xb85e7d336e4695a4f83eff2817f70dcdc4270eb8",
+      "name": "Uniswap 5",
+      "venue": "uniswap-v3",
+      "kind": "v3",
+      "token0": "0x4200000000000000000000000000000000000006",
+      "token1": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool WETH/RIZE (was POOL UNKNW 6)"
+    },
+    {
+      "chain": "base",
+      "key": "0x8ae3f08cf63c1ef845606292f3387d6ac60a815e",
+      "name": "Uniswap 6",
+      "venue": "uniswap-v3",
+      "kind": "v3",
+      "token0": "0x4200000000000000000000000000000000000006",
+      "token1": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool WETH/RIZE (was POOL UNKNW 7)"
+    },
+    {
+      "chain": "base",
+      "key": "0x308d7113be2e5f359ac1e1099e94e52aa79d8bb1",
+      "name": "Uniswap 7",
+      "venue": "uniswap-v3",
+      "kind": "v3",
+      "token0": "0x4200000000000000000000000000000000000006",
+      "token1": "0x9818b6c09f5ecc843060927e8587c427c7c93583",
+      "fee": null,
+      "tick_spacing": null,
+      "factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
+      "gauge": "",
+      "status": "active",
+      "source": "manual",
+      "note": "V3 pool WETH/RIZE (was POOL UNKNW 8)"
+    }
+  ],
+  "not_pools": [
+    {
+      "chain": "base",
+      "key": "0x0851e36d477577cc0f7ec4f796a89213bd83e2bc",
+      "note": "was POOL UNKNW 9: Arrakis proxy (see entities.json)"
+    },
+    {
+      "chain": "bsc",
+      "key": "0x60ec22e3443cdaddcc4cebdf8d34797df29984d4",
+      "note": "was POOL UNKNW 10: Arrakis proxy (see entities.json)"
     }
   ]
 }
