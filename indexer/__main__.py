@@ -103,7 +103,7 @@ def run_unified_command(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="indexer", description=__doc__)
     p.add_argument("command", choices=["init-db", "probe", "find-start", "sync", "verify", "verify-balances", "inspect", "balance", "status",
-                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report", "unified"])
+                                          "enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report", "tokens", "unified"])
     p.add_argument("--chain", default="all")
     p.add_argument("--max-minutes", type=float, default=None,
                    help="stop cleanly after this many minutes (progress is saved)")
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--receipts", type=int, default=0, help="inspect: show the token logs of the first N transactions")
     p.add_argument("--address", default=None, help="balance: wallet address; reprocess: addresses (comma-separated)")
     p.add_argument("--blocks", default=None, help="balance: comma-separated block numbers")
-    p.add_argument("--rebuild", action="store_true", help="enrich: forget the trades / liquidity moves of the chain and recompute them")
+    p.add_argument("--rebuild", action="store_true", help="enrich: forget the trades / liquidity moves of the chain and recompute them; tokens: ask the unreadable contracts again")
     p.add_argument("--limit", type=int, default=300, help="ccip: burn transactions to look up per chain in one run")
     p.add_argument("--discover-top", type=int, default=60, help="discover: how many of the busiest addresses to test")
     p.add_argument("--reasons", default=None, help="reprocess: review reasons to re-read (unknown_pool,guess,flag,crash; none = skip)")
@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     budget = args.max_minutes * 60 if args.max_minutes else None
     t_start = time.monotonic()
     reg = None
-    if args.command in ("enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report"):
+    if args.command in ("enrich", "snapshot", "discover", "ccip", "ccip-gaps", "repair", "reprocess", "report", "tokens"):
         db.init_schema(conn)                                  # idempotent: creates the market tables on first use
         db.ensure_chains(conn, chains)
         reg = Registry.from_dir()
@@ -157,6 +157,12 @@ def main(argv: list[str] | None = None) -> int:
         log(f"registry: {len(reg.pools())} pools ({sum(1 for x in reg.pools() if x.source == 'auto')} found automatically)")
     if args.command == "report":
         enrich_mod.report(conn, log)
+        return 0
+    if args.command == "tokens":
+        from . import tokens as tokens_mod
+        clients = {c.key: make_client(c) for c in chains}
+        res = tokens_mod.discover(conn, clients, {c.key: c for c in chains}, reg, log, retry_unreadable=args.rebuild)
+        log(f"tokens: {res}")
         return 0
     if args.command == "ccip-gaps":
         from .ccip import gap_check
