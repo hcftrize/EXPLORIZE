@@ -83,3 +83,20 @@ SELECT 'review', verdict, reason, NULL, rize / 1e18, NULL, detail
 UNION ALL
 SELECT 'liquidity', kind, '0x' || encode(pool_key, 'hex'), '0x' || encode(provider, 'hex'), rize / 1e18, NULL, NULL
   FROM liquidity_events WHERE tx_hash = decode(substr('0xPUT_THE_HASH_HERE', 3), 'hex');
+
+
+-- 15. Tokens named automatically from their contract ("other assets"): the ones that still need a logo.
+--     Add assets/explorize/tokens/<logo>.svg (or png / jpg / webp); the file name is the lower-case symbol suggested below.
+--     source = auto: read from the contract. unreadable: the contract did not answer like a token (not asked again; the `tokens`
+--     command with "rebuild" ticked asks again). To force a name, write the token in labels/tokens.json (the file always wins).
+WITH used AS (
+  SELECT chain_id, k AS token, count(*) AS uses FROM trades, LATERAL jsonb_object_keys(counter) AS k GROUP BY 1, 2
+  UNION ALL
+  SELECT chain_id, k, count(*) FROM liquidity_events, LATERAL jsonb_object_keys(counter) AS k GROUP BY 1, 2)
+SELECT t.chain_id, '0x' || encode(t.address, 'hex') AS token, t.symbol, t.name, t.decimals, t.source,
+       lower(regexp_replace(t.symbol, '[^A-Za-z0-9]+', '-', 'g')) AS logo_file_name,
+       coalesce(sum(u.uses), 0) AS uses_in_trades_and_liquidity
+  FROM tokens t LEFT JOIN used u ON u.chain_id = t.chain_id AND lower(u.token) = encode(t.address, 'hex')
+ WHERE t.source IN ('auto', 'unreadable')
+ GROUP BY t.chain_id, t.address, t.symbol, t.name, t.decimals, t.source
+ ORDER BY uses_in_trades_and_liquidity DESC, t.chain_id;

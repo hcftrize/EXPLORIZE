@@ -1,5 +1,5 @@
 {
-  "_readme": "Address labels. chain = 'all' or a chain slug (base, ethereum, bsc, polygon). category: dex | aggregator | bridge | proxy | liquidity-manager | account-abstraction | cex | team | wallet | system | other. logo = file name in assets/explorize/entities/ (or venues/). Add as many lines as you like; this file is the one you maintain.",
+  "_readme": "Address labels. chain = 'all' or a chain slug (base, ethereum, bsc, polygon). category: dex | market-maker | aggregator | bridge | proxy | liquidity-manager | account-abstraction | cex | team | wallet | system | other. logo = file name in assets/explorize/entities/ (or venues/). Add as many lines as you like; this file is the one you maintain. entity (optional) = the group an address is added up under in the Entities tab; label = what the tables show for that one address.",
   "entities": [
     {
       "address": "0x0000000000000000000000000000000000000000",
@@ -32,16 +32,8 @@
       "category": "aggregator",
       "source": "seed",
       "logo": "kyberswap",
-      "role": "KyberSwap Meta Aggregation Router"
-    },
-    {
-      "address": "0x8f10b468b06c6fd214b65f87778827f7d113f996",
-      "chain": "ethereum",
-      "label": "KyberSwap",
-      "category": "aggregator",
-      "source": "earlier notes, to confirm",
-      "logo": "kyberswap",
-      "role": "KyberSwap executor"
+      "role": "KyberSwap Meta Aggregation Router",
+      "entity": "KyberSwap"
     },
     {
       "address": "0x0000000071727de22e5e9d8baf0edac6f37da032",
@@ -80,15 +72,6 @@
       "role": "PancakeSwap Infinity CLPoolManager"
     },
     {
-      "address": "0x238a358808379702088667322f80ac48bad5e6c4",
-      "chain": "bsc",
-      "label": "PancakeSwap",
-      "category": "dex",
-      "source": "seen in transfers",
-      "logo": "pancakeswap",
-      "role": "PancakeSwap Infinity Vault"
-    },
-    {
       "address": "0x34b03cb9086d7d758ac55af71584f81a598759fe",
       "chain": "bsc",
       "label": "Chainlink CCIP",
@@ -122,7 +105,8 @@
       "category": "liquidity-manager",
       "source": "seen in LP transactions",
       "logo": "arrakis",
-      "role": "Arrakis (sender)"
+      "role": "Arrakis (sender)",
+      "entity": "Arrakis"
     },
     {
       "address": "0x2e6e879648293e939aa68ba4c6c129a1be733bda",
@@ -131,7 +115,347 @@
       "category": "liquidity-manager",
       "source": "seen in LP transactions",
       "logo": "arrakis",
-      "role": "Arrakis (executor)"
+      "role": "Arrakis (executor)",
+      "entity": "Arrakis"
+    },
+    {
+      "address": "0x7dafba1d69f6c01ae7567ffd7b046ca03b706f83",
+      "chain": "base",
+      "label": "Kraken (0x7DA)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "kraken",
+      "entity": "Kraken"
+    },
+    {
+      "address": "0xd2dd7b597fd2435b6db61ddf48544fd931e6869f",
+      "chain": "base",
+      "label": "Kraken (0xd2D)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "kraken",
+      "entity": "Kraken"
+    },
+    {
+      "address": "0xcc282e2004428939ee5149a9e7872f0b4d5d5ec7",
+      "chain": "base",
+      "label": "Kraken (0xcC2)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "kraken",
+      "entity": "Kraken"
+    },
+    {
+      "address": "0x02ac4617fe004cf8cd9c988ff9c905b2ec676c2d",
+      "chain": "base",
+      "label": "Kraken (0x02A)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "kraken",
+      "entity": "Kraken"
+    },
+    {
+      "address": "0x504ce9e51e508c85a161058c12e970a903d482fc",
+      "chain": "base",
+      "label": "Kraken Deposit (0x504)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "kraken",
+      "entity": "Kraken"
+    },
+    {
+      "address": "0x4e3ae00e8323558fa5cac04b152238924aa31b60",
+      "chain": "base",
+      "label": "MEXC (0x4e3)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "mexc",
+      "entity": "MEXC"
+    },
+    {
+      "address": "0x0529ea5885702715e83923c59746ae8734c553b7",
+      "chain": "base",
+      "label": "Bitpanda (0x052)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "bitpanda",
+      "entity": "Bitpanda"
+    },
+    {
+      "address": "0xb2e6cf3e1ff4ce3f4ecb0baebbc06e3f351f027e",
+      "chain": "base",
+      "label": "MEXC Deposit (0xB2e)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "mexc",
+      "entity": "MEXC"
+    },
+    {
+      "address": "0x36dfe932aeb10032f1d93ee2dd80df9c847e4b66",
+      "chain": "base",
+      "label": "MEXC Deposit (0x36d)",
+      "category": "cex",
+      "source": "first list 2026-11-24",
+      "logo": "mexc",
+      "entity": "MEXC"
+    },
+    {
+      "address": "0xf8191d98ae98d2f7abdfb63a9b0b812b93c873aa",
+      "chain": "base",
+      "label": "Wintermute: HotW (0xf81)",
+      "category": "market-maker",
+      "source": "first list 2026-11-24",
+      "logo": "wintermute",
+      "entity": "Wintermute"
+    },
+    {
+      "address": "0x51c72848c68a965f66fa7a88855f9f7784502a7f",
+      "chain": "base",
+      "label": "Wintermute: MM (0x51C)",
+      "category": "market-maker",
+      "source": "first list 2026-11-24",
+      "logo": "wintermute",
+      "entity": "Wintermute"
+    },
+    {
+      "address": "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae",
+      "chain": "all",
+      "label": "LiFi (0x123)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "lifi",
+      "entity": "LiFi"
+    },
+    {
+      "address": "0x8f10b468b06c6fd214b65f87778827f7d113f996",
+      "chain": "all",
+      "label": "Kyber Network (0x8F1)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "kyberswap",
+      "entity": "KyberSwap",
+      "role": "KyberSwap executor"
+    },
+    {
+      "address": "0x103502909141f7025a94b7b99a276dcd128e21a8",
+      "chain": "base",
+      "label": "0x: BaseSettler (0x103)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "0x",
+      "entity": "0x"
+    },
+    {
+      "address": "0x7d6839415693801e94cdc4a7d732c9a3fdbbd1d7",
+      "chain": "base",
+      "label": "0x: BaseSettler (0x7d6)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "0x",
+      "entity": "0x"
+    },
+    {
+      "address": "0x0729e2a4716d9f7dd17858d5d504426d228697f7",
+      "chain": "all",
+      "label": "Relay.link Router (0x072)",
+      "category": "bridge",
+      "source": "first list 2026-11-24",
+      "logo": "relay",
+      "entity": "Relay.link"
+    },
+    {
+      "address": "0x0a2854fbbd9b3ef66f17d47284e7f899b9509330",
+      "chain": "base",
+      "label": "MetaMask Spender (0x0a2)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "metamask",
+      "entity": "MetaMask"
+    },
+    {
+      "address": "0x9008d19f58aabd9ed0d60971565aa8510560ab41",
+      "chain": "all",
+      "label": "CoW Protocol Settlement (0x900)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "cow",
+      "entity": "CoW Protocol"
+    },
+    {
+      "address": "0x111111125421ca6dc452d289314280a0f8842a65",
+      "chain": "all",
+      "label": "1inch RouterV6 (0x111)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "1inch",
+      "entity": "1inch"
+    },
+    {
+      "address": "0x376d39cf45fd24c2275aef40b0a9416bba75ed24",
+      "chain": "base",
+      "label": "Proxy Beacon (0x376)",
+      "category": "proxy",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x195627f03fe2668d65c763cd39eec45b1d76c8ee",
+      "chain": "base",
+      "label": "RouteRacer (0x195)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "routeracer",
+      "entity": "RouteRacer"
+    },
+    {
+      "address": "0x337685fdab40d39bd02028545a4ffa7d287cc3e2",
+      "chain": "all",
+      "label": "Mayan Forwarder (0x337)",
+      "category": "bridge",
+      "source": "first list 2026-11-24",
+      "logo": "mayan",
+      "entity": "Mayan"
+    },
+    {
+      "address": "0x09ad820aac5779683b481c4674208a4e1b024afa",
+      "chain": "all",
+      "label": "Fly Aggregator (0x09A)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "fly",
+      "entity": "Fly"
+    },
+    {
+      "address": "0xa5c1ce365ddb5a91ff466774ec4bdf8f97cb9f55",
+      "chain": "base",
+      "label": "MetaMask (0xA5c)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "metamask",
+      "entity": "MetaMask"
+    },
+    {
+      "address": "0x238a358808379702088667322f80ac48bad5e6c4",
+      "chain": "all",
+      "label": "PancakeSwap Vault (0x238)",
+      "category": "dex",
+      "source": "first list 2026-11-24",
+      "logo": "pancakeswap",
+      "entity": "PancakeSwap",
+      "role": "PancakeSwap Infinity Vault"
+    },
+    {
+      "address": "0x0fef9e88a7b76bcdbf451780c6774fe32965ee98",
+      "chain": "base",
+      "label": "Metarouter (0x0fE)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "metarouter",
+      "entity": "Metarouter"
+    },
+    {
+      "address": "0xa8373266b754203d6ac8bee7903d57bae4b8dbdb",
+      "chain": "base",
+      "label": "Sickle (0xA83)",
+      "category": "liquidity-manager",
+      "source": "first list 2026-11-24",
+      "logo": "sickle",
+      "entity": "Sickle"
+    },
+    {
+      "address": "0xddd6111f4a5864acb3a6760643d307102a682ba5",
+      "chain": "base",
+      "label": "Arrakis : BeaconProxy (0xDDD)",
+      "category": "liquidity-manager",
+      "source": "first list 2026-11-24",
+      "logo": "arrakis",
+      "entity": "Arrakis"
+    },
+    {
+      "address": "0x411d2c093e4c2e69bf0d8e94be1bf13dadd879c6",
+      "chain": "base",
+      "label": "OKX DexRouter (0x411)",
+      "category": "aggregator",
+      "source": "first list 2026-11-24",
+      "logo": "okx",
+      "entity": "OKX"
+    },
+    {
+      "address": "0x0851e36d477577cc0f7ec4f796a89213bd83e2bc",
+      "chain": "base",
+      "label": "Arrakis : Proxy (0x085)",
+      "category": "liquidity-manager",
+      "source": "first list 2026-11-24",
+      "logo": "arrakis",
+      "entity": "Arrakis",
+      "role": "Arkham: Arrakis AerodromeStandardModulePrivate"
+    },
+    {
+      "address": "0x60ec22e3443cdaddcc4cebdf8d34797df29984d4",
+      "chain": "bsc",
+      "label": "Arrakis : Proxy (0x60E)",
+      "category": "liquidity-manager",
+      "source": "first list 2026-11-24",
+      "logo": "arrakis",
+      "entity": "Arrakis",
+      "role": "Arkham: Arrakis PancakeSwapV4StandardModulePrivate"
+    },
+    {
+      "address": "0x9525df984b7062c7c0fb103bc745467396241e7b",
+      "chain": "base",
+      "label": "Community treasury (0x952)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x5a134098bdbeb05da9eac35439c5624547ed26ee",
+      "chain": "base",
+      "label": "GovernanceBonding (0x5a1)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x0151988326ded907853c7b75641d6a7897959510",
+      "chain": "base",
+      "label": "Partnerships & Growth (0x015)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0xb69cecd9cf0af96f88b5fa8969860e4ee6f617a9",
+      "chain": "base",
+      "label": "Team Allocation (0xB69)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x3556c012384fb224cb5ce222c98d6e0521334671",
+      "chain": "base",
+      "label": "Team: Liquidity Management (0x355)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x08f326ac9192d92584d33d1b2560c4460291643b",
+      "chain": "base",
+      "label": "Team: OP & Execution (0x08f)",
+      "category": "team",
+      "source": "first list 2026-11-24",
+      "logo": ""
+    },
+    {
+      "address": "0x27db19a5df62d79db17ec51c51b10009cfa3280e",
+      "chain": "base",
+      "label": "BaseRizeMintBurnPoolV2 (0x27D)",
+      "category": "bridge",
+      "source": "first list 2026-11-24",
+      "logo": "chainlink",
+      "role": "CCIP token pool on Base (to confirm)"
     }
   ]
 }

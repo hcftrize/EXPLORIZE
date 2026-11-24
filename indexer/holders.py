@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 import psycopg2.extras
 
-from . import config, db
+from . import config, db, entities as entities_mod
 from .governance import BOND_NFT, GOVERNANCE, read_bonds
 from .multicall import (SEL_BALANCE_OF, SEL_GET_SCHEDULE, SEL_GET_VESTING_INITIATOR, SEL_TOTAL_SUPPLY,
                         call_address, call_none, call_uint, dec_address, dec_schedule, dec_uint, multicall)
@@ -184,8 +184,9 @@ def build(clients: dict[str, RpcClient], chains: dict[str, config.Chain], conn, 
 
     # 3. totals and ranking
     top, total_holders = rank_holders(held, per_owner)
+    ent_rows, ent_members = entities_mod.compute(entities_mod.load_groups(conn, chains), held, per_owner, list(chains))
 
-    return {"top": top, "bonds": gov["bonds"], "vesting": gov["vesting"], "diff": gov["diff"],
+    return {"entities": ent_rows, "entity_members": ent_members, "chains": chains, "top": top, "bonds": gov["bonds"], "vesting": gov["vesting"], "diff": gov["diff"],
             "contract_balance": gov["contract_balance"], "bonded_total": gov["bonded_total"],
             "queued_total": gov["queued_total"], "base_block": heads["base"],
             "snapshot_ts": snap_ts, "addresses_read": n_read, "holders_total": total_holders,
@@ -198,6 +199,8 @@ def store(conn, snap: dict) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM holders")
         cur.execute("DELETE FROM bonds")
+        if "entities" in snap:                                  # same transaction: the Entities tab carries the Top Holders date
+            entities_mod.store(cur, snap["entities"], snap["entity_members"], snap["chains"])
         psycopg2.extras.execute_values(cur, """
             INSERT INTO holders (rank, address, held, held_by_chain, bonded, queued, vested_locked, bond_count, total)
             VALUES %s""", [(r["rank"], b(r["address"]), r["held"], psycopg2.extras.Json(r["held_by_chain"]),

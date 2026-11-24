@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS ccip_checked (
 
 -- Names the site shows, written from the labels folder by the enrich command.
 ALTER TABLE labels ADD COLUMN IF NOT EXISTS logo text;
+ALTER TABLE labels ADD COLUMN IF NOT EXISTS entity text;      -- group name: every address with the same entity is added up in the Entities tab
 CREATE TABLE IF NOT EXISTS venues (
   key   text PRIMARY KEY,
   name  text NOT NULL,
@@ -240,6 +241,9 @@ CREATE TABLE IF NOT EXISTS tokens (
   decimals  integer NOT NULL,
   PRIMARY KEY (chain_id, address)
 );
+ALTER TABLE tokens ALTER COLUMN decimals DROP NOT NULL;                  -- NULL for a token whose contract could not be read
+ALTER TABLE tokens ADD COLUMN IF NOT EXISTS name   text;
+ALTER TABLE tokens ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'file';   -- file (labels/tokens.json) | auto (read from the contract) | unreadable
 
 -- Unified update: live balances (kept up to date incrementally, one row per chain and address) and the log of published runs.
 ALTER TABLE chain_state ADD COLUMN IF NOT EXISTS balances_block bigint;     -- block up to which holder_balances is exact
@@ -248,6 +252,28 @@ CREATE TABLE IF NOT EXISTS holder_balances (
   addr      bytea         NOT NULL,
   balance   numeric(78,0) NOT NULL,
   PRIMARY KEY (chain_id, addr)
+);
+-- Entities tab: what every known entity holds, all its addresses added up. Rebuilt in the same transaction as `holders`
+-- (so it carries the same date and block as the Top Holders table).
+CREATE TABLE IF NOT EXISTS entity_holdings (
+  rank           integer       PRIMARY KEY,
+  entity         text          NOT NULL UNIQUE,
+  category       text          NOT NULL,
+  logo           text,
+  addresses      integer       NOT NULL,                 -- addresses of the entity that hold something
+  held           numeric(78,0) NOT NULL,
+  held_by_chain  jsonb         NOT NULL DEFAULT '{}',
+  bonded         numeric(78,0) NOT NULL DEFAULT 0,       -- governance bonds on Base, queued releases included
+  total          numeric(78,0) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entity_members (
+  entity    text          NOT NULL,
+  chain_id  integer       NOT NULL,
+  address   bytea         NOT NULL,
+  label     text,
+  held      numeric(78,0) NOT NULL,
+  bonded    numeric(78,0) NOT NULL DEFAULT 0,
+  PRIMARY KEY (entity, chain_id, address)
 );
 CREATE TABLE IF NOT EXISTS unified_runs (
   id          bigserial   PRIMARY KEY,
@@ -263,7 +289,7 @@ CREATE INDEX IF NOT EXISTS unified_runs_ok_idx ON unified_runs (ok, started_at D
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'explorize_ro') THEN
-    GRANT SELECT ON bonds, holders, holders_meta, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_messages, ccip_checked, venues, tokens, unified_runs TO explorize_ro;
+    GRANT SELECT ON bonds, holders, holders_meta, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_messages, ccip_checked, venues, tokens, unified_runs, entity_holdings, entity_members TO explorize_ro;
   END IF;
 END
 $$;

@@ -82,7 +82,7 @@ def test_a_classic_pool_liquidity_add_is_read_from_the_mint_event():
 
 
 def test_an_unregistered_pool_with_swap_events_is_reported_as_certain():
-    fren = "0x7f471a684bab236597d44caa32fc1afe0b262bea"
+    fren = "0x" + "7f" * 20                                  # an address that is in no labels file
     rz = 173492870397716955831
     rec = Rec().transfer(BSC_RIZE, VAULT, fren, rz).v2_swap(fren, 0, rz, 2662615000000000000, 0)
     b = enrich.build("bsc", REG, {**rec.done(), "blockNumber": hex(7)}, info(BUYER))
@@ -147,7 +147,7 @@ def test_the_job_enriches_checkpoints_and_is_idempotent(conn):
         cur.execute("SELECT count(*) FROM pools WHERE chain_id = 56")
         n_pools = cur.fetchone()[0]
     assert side == "buy" and rize == rz and trader == BUYER[2:] and Decimal(usd) > 99 and state == (133406000, 1)
-    assert fills[0]["pool"] == ID_BSC and n_pools == 1
+    assert fills[0]["pool"] == ID_BSC and n_pools == len(reg.pools("bsc"))     # the pools of labels/pools.json, none invented
     # running again on the same data changes nothing (the checkpoint re-reads only the reorg margin)
     enrich.enrich_chain(chain, node, conn, reg, log=logs.append)
     with conn.cursor() as cur:

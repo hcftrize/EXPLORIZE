@@ -133,6 +133,7 @@ def test_a_consistent_run_is_published_whole(conn, monkeypatch):
     s = db.connect_staged(url())
     out = unified.run_unified(s, list(chains.values()), nodes, Registry.from_dir(), log=lambda m: None)
     assert out["holders"]["wallets"] >= 1 and out["balances"]["base"]["seeded"] is True
+    assert "error" not in out["tokens"] and "entities" in out["holders"]     # token naming and the Entities tab ran
     assert other("SELECT count(*) FROM holders") == [(0,)]        # nothing visible before the end
     assert other("SELECT count(*) FROM unified_runs") == [(0,)]
     s.publish()

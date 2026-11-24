@@ -40,12 +40,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import psycopg2.extras
 
-from . import config, db, enrich as enrich_mod, holders as holders_mod
+from . import config, db, enrich as enrich_mod, entities as entities_mod, holders as holders_mod, tokens as tokens_mod
 from .ccip import bridge_report, ccip_backlog, ccip_sync
 from .multicall import SEL_BALANCE_OF, call_address, dec_uint, multicall
 from .registry import Registry
@@ -165,15 +165,16 @@ def update_ranking(conn, clients, chains: dict[str, config.Chain], balances: dic
         if not held[gov_addr]:
             del held[gov_addr]
     top, total_holders = holders_mod.rank_holders(held, gov["per_owner"])
+    ent_rows, ent_members = entities_mod.compute(entities_mod.load_groups(conn, chains), held, gov["per_owner"], list(chains))
     snap_ts = base_client.get_block_timestamps([base_block])[base_block]
-    snap = {"top": top, "bonds": gov["bonds"], "vesting": gov["vesting"], "diff": gov["diff"],
+    snap = {"entities": ent_rows, "entity_members": ent_members, "chains": chains, "top": top, "bonds": gov["bonds"], "vesting": gov["vesting"], "diff": gov["diff"],
             "contract_balance": gov["contract_balance"], "bonded_total": gov["bonded_total"],
             "queued_total": gov["queued_total"], "base_block": base_block, "snapshot_ts": snap_ts,
             "addresses_read": sum(b["read"] for b in balances.values()), "holders_total": total_holders, "seconds": 0.0}
     holders_mod.store(conn, snap)
     log(f"ranking: {total_holders:,} wallets hold RIZE, top {len(top)} stored (Base block {base_block:,}); "
         f"governance difference {gov['diff']}")
-    return {"wallets": total_holders, "top": len(top), "base_block": base_block, "governance_diff": gov["diff"],
+    return {"entities": len(ent_rows), "wallets": total_holders, "top": len(top), "base_block": base_block, "governance_diff": gov["diff"],
             "bonds": len(gov["bonds"])}
 
 
@@ -288,6 +289,16 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
     def left(share: float = 1.0) -> float:
         return max((max_seconds - (time.monotonic() - t0)) * share, 1.0)
 
+    marks = {"t": t0}
+    timings: dict = {}
+
+    def tick(phase: str) -> None:
+        """How long each phase took: the first thing to look at if a run is slower than expected."""
+        now_ = time.monotonic()
+        timings[phase] = round(now_ - marks["t"], 1)
+        marks["t"] = now_
+        log(f"[timing] {phase}: {timings[phase]}s")
+
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_xact_lock(%s), now()", (ADVISORY_KEY,))
         got, tx_now = cur.fetchone()
@@ -328,6 +339,7 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
         if res.get("stopped_early") or lag > 0 and lag > c.reorg_margin:
             block(f"behind:{key}", f"{key}: not at the head of the chain ({lag:,} blocks behind) after the time budget: catch up with "
                                    f"the separate sync workflow, then start this one again")
+    tick("sync")
     stop()
 
     # 2. supply check (anomaly only) ------------------------------------------------------------------------------
@@ -340,6 +352,7 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
             anoms.append((f"supply:{key}:{ours - theirs}", f"supply / {key}",
                           f"block {last:,}: our transfers give {_amount(ours)} RIZE, totalSupply() says {_amount(theirs)} (difference {_amount(ours - theirs)})"))
     summary["supply_anomalies"] = sum(1 for a in anoms if a[1].startswith("supply"))
+    tick("supply check")
 
     # 3. trades and liquidity moves ------------------------------------------------------------------------------
     for key, c in chains.items():
@@ -367,7 +380,20 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
             anoms.append((f"crash:{key}:0x{bytes(txh).hex()}", f"crash / {key}",
                           f"block {blk:,} tx 0x{bytes(txh).hex()} could not be read by the market layer ({(detail or '')[:120]})"))
         summary["chains"][key]["crashes"] = len(crashes)
+    tick("trades and liquidity")
     stop()
+
+    # 3b. names of the unknown tokens ("other assets"): never blocks a run ----------------------------------------------
+    try:
+        # only what traded since the previous published run (cheap); the `tokens` command catches up on the whole history
+        summary["tokens"] = tokens_mod.discover(conn, clients, chains, reg, log,
+                                                 since=None if prev_ok is None else prev_ok - timedelta(hours=2))
+    except Exception as e:  # noqa: BLE001 - naming tokens is a nicety, the run goes on
+        conn.rollback()
+        summary["tokens"] = {"error": type(e).__name__}
+        log(f"tokens: skipped ({type(e).__name__}: {str(e)[:120]})")
+    conn.commit()
+    tick("tokens")
 
     # 4. CCIP -----------------------------------------------------------------------------------------------------
     ccip_stats: dict = {}
@@ -393,6 +419,7 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
                       f"burned {_amount(f['burned'])}  minted {_amount(f['minted'])}  send {f['send_tx']}  receive {f['receive_tx']}"))
     summary["ccip"] = {**ccip_stats, "messages": rep["messages"], "matched": rep["matched"], "in_flight": rep["pending_or_failed"],
                        "ahead_of_sync": rep["ahead_of_sync"], "anomalies": len(rep["flagged"]), "backlog": backlog}
+    tick("ccip")
     stop()
 
     # 5. balances: every run, cheap (only the addresses that moved); stored, not displayed ------------------------------
@@ -404,6 +431,7 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
             anoms.append((f"balances:{key}:{v['sum'] - v['supply']}", f"balances / {key}",
                           f"block {v['block']:,}: the balances read add up to {_amount(v['sum'])} RIZE, totalSupply() says "
                           f"{_amount(v['supply'])} (difference {_amount(v['sum'] - v['supply'])})"))
+    tick("balances")
 
     # 6. Top Holders table (governance read + ranking): only when the published one is older than the window -------------
     every = ranking_every_hours if ranking_every_hours is not None else float(os.environ.get("RANKING_EVERY_HOURS") or RANKING_EVERY_HOURS)
@@ -419,12 +447,15 @@ def run_unified(conn, chains_list: list[config.Chain], clients: dict, reg: Regis
     else:
         log(f"Top Holders table: kept as published ({why})")
         summary["holders"] = {"rebuilt": False, "reason": why}
+    tick("top holders")
 
     # 7. alignment checks, record, done -------------------------------------------------------------------------------
     for text in structural_checks(conn, chains, targets, balances, tx_now, ranking_done=due):
         block("alignment", text)
     stop()
     summary["anomalies"] = len(anoms)
+    tick("checks")
+    summary["timings"] = timings
     summary["seconds"] = round(time.monotonic() - t0, 1)
     record(conn, tx_now, True, summary, None)
     return summary

@@ -62,8 +62,10 @@ def _read(path: Path):
 
 
 class Registry:
-    def __init__(self, tokens: dict, venues: dict, pools: list[Pool], entities: list[dict]):
+    def __init__(self, tokens: dict, venues: dict, pools: list[Pool], entities: list[dict], not_pools: list[dict] | None = None):
         self._tokens = tokens
+        # addresses the code took for pools but the owner says are something else (a liquidity manager's proxy...): never pools
+        self.not_pools: set[tuple[str, str]] = {(n["chain"], n["key"].lower()) for n in (not_pools or [])}
         self.venues = venues.get("venues", {})
         self.factories = {k.lower(): v for k, v in venues.get("factories", {}).items()}
         self._pools: dict[tuple[str, str], Pool] = {(p.chain, p.key): p for p in pools}
@@ -75,7 +77,8 @@ class Registry:
         d = Path(path) if path else LABELS_DIR
         tokens = _read(d / "tokens.json")
         venues = _read(d / "venues.json")
-        raw = _read(d / "pools.json").get("pools", [])
+        pools_file = _read(d / "pools.json")
+        raw = pools_file.get("pools", [])
         entities = _read(d / "entities.json").get("entities", [])
         pools = []
         for p in raw:
@@ -85,7 +88,7 @@ class Registry:
                 tick_spacing=p.get("tick_spacing"), factory=_lower(p.get("factory")), gauge=_lower(p.get("gauge")),
                 manager=_lower(p.get("manager")), holder=_lower(p.get("holder")), status=p.get("status", "active"),
                 source=p.get("source", "manual"), note=p.get("note", "")))
-        return cls(tokens, venues, pools, entities)
+        return cls(tokens, venues, pools, entities, pools_file.get("not_pools", []))
 
     # ------------------------------------------------------------------ tokens
     def _chain_tokens(self, chain: str) -> dict:
@@ -126,6 +129,11 @@ class Registry:
 
     def pool(self, chain: str, key: str) -> Pool | None:
         return self._pools.get((chain, _lower(key)))
+
+    def is_not_pool(self, chain: str, key: str) -> bool:
+        """Listed under "not_pools" in labels/pools.json, or labelled by the owner as something that is not a pool."""
+        k = _lower(key)
+        return (chain, k) in self.not_pools or (self.entity(chain, k) is not None and self.pool(chain, k) is None)
 
     def add_pool(self, pool: Pool) -> None:
         self._pools[(pool.chain, pool.key)] = pool
@@ -182,5 +190,7 @@ class Registry:
         """Merge pools stored in the database (auto-discovered ones, or renamed) without overriding the labels files."""
         for r in rows:
             key = (r["chain"], r["key"])
+            if key in self.not_pools:
+                continue
             if key not in self._pools:
                 self._pools[key] = Pool(**r)
