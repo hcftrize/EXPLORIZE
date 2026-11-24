@@ -209,6 +209,12 @@ def sync_registry(conn, reg: Registry, chains: dict) -> None:
     """Labels files -> `pools` table (the owner's file wins), then the discovered pools of the table -> the registry."""
     by_id = {c.chain_id: c.key for c in chains.values()}
     with conn.cursor() as cur:
+        for chain, key in sorted(reg.not_pools):                  # found by the code, declared "not a pool" by the owner
+            if chain in chains:
+                cur.execute("DELETE FROM pools WHERE chain_id = %s AND pool_key = %s AND source = 'auto'",
+                            (chains[chain].chain_id, psycopg2.Binary(key_bytes(key))))
+                cur.execute("DELETE FROM labels WHERE chain_id = %s AND address = %s AND category = 'pool'",
+                            (chains[chain].chain_id, psycopg2.Binary(key_bytes(key))))
         for p in reg.pools():
             if p.source == "auto" or p.chain not in chains:
                 continue
@@ -243,17 +249,17 @@ def sync_labels(conn, reg: Registry, chains: dict) -> None:
             cid = 0 if e["chain"] == "all" else ids.get(e["chain"])
             if cid is None:
                 continue
-            cur.execute("""INSERT INTO labels (address, chain_id, label, category, source, logo) VALUES (%s,%s,%s,%s,%s,%s)
+            cur.execute("""INSERT INTO labels (address, chain_id, label, category, source, logo, entity) VALUES (%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (address, chain_id) DO UPDATE SET label=EXCLUDED.label, category=EXCLUDED.category,
-                             source=EXCLUDED.source, logo=EXCLUDED.logo""",
+                             source=EXCLUDED.source, logo=EXCLUDED.logo, entity=EXCLUDED.entity""",
                         (psycopg2.Binary(key_bytes(e["address"])), cid, e["label"], e.get("category", "other"),
-                         e.get("source"), e.get("logo") or None))
+                         e.get("source"), e.get("logo") or None, (e.get("entity") or "").strip() or None))
         for p in reg.pools():
             if p.chain not in ids or p.is_id:
                 continue                                           # pool ids are not addresses: they are named by `pools`
-            cur.execute("""INSERT INTO labels (address, chain_id, label, category, source, logo) VALUES (%s,%s,%s,'pool',%s,NULL)
+            cur.execute("""INSERT INTO labels (address, chain_id, label, category, source, logo, entity) VALUES (%s,%s,%s,'pool',%s,NULL,NULL)
                            ON CONFLICT (address, chain_id) DO UPDATE SET label=EXCLUDED.label, category='pool',
-                             source=EXCLUDED.source""",
+                             source=EXCLUDED.source, entity=NULL""",
                         (psycopg2.Binary(key_bytes(p.key)), ids[p.chain], p.name, p.source))
         for key, v in reg.venues.items():
             cur.execute("""INSERT INTO venues (key, name, kind, logo) VALUES (%s,%s,%s,%s)
@@ -261,8 +267,9 @@ def sync_labels(conn, reg: Registry, chains: dict) -> None:
                         (key, v.get("name", key), v.get("kind", "dex"), v.get("logo") or None))
         for chain, cid in ids.items():
             for addr, (sym, dec) in reg.token_meta(chain).items():
-                cur.execute("""INSERT INTO tokens (chain_id, address, symbol, decimals) VALUES (%s,%s,%s,%s)
-                               ON CONFLICT (chain_id, address) DO UPDATE SET symbol=EXCLUDED.symbol, decimals=EXCLUDED.decimals""",
+                cur.execute("""INSERT INTO tokens (chain_id, address, symbol, decimals, source) VALUES (%s,%s,%s,%s,'file')
+                               ON CONFLICT (chain_id, address) DO UPDATE SET symbol=EXCLUDED.symbol, decimals=EXCLUDED.decimals,
+                                 source='file'""",
                             (cid, psycopg2.Binary(key_bytes(addr)), sym, dec))
     conn.commit()
 
@@ -379,6 +386,12 @@ def register_unknowns(client, conn, chain, reg: Registry, addrs: list[str], log)
     know. Named POOL UNKNW n: the owner renames them in labels/pools.json (the file always wins over this name)."""
     from .market_check import SEL, read_pool_tokens
     rize = reg.rize(chain.key)
+    skipped = [a for a in addrs if reg.is_not_pool(chain.key, a)]
+    if skipped:
+        log(f"  [{chain.key}] {len(skipped)} address(es) that emit swap-like events are not pools according to labels: left out")
+    addrs = [a for a in addrs if a not in skipped]
+    if not addrs:
+        return []
     found = read_pool_tokens(client, addrs)
     ts = multicall(client, [(a, bytes.fromhex(SEL["tickSpacing"])) for a in addrs], group=100) if addrs else []
     out = []
