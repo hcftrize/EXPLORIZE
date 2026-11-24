@@ -30,6 +30,36 @@
       "kind": "dex",
       "chain": "ethereum",
       "logo": "dodo.svg"
+    },
+    "pancakeswap-v3": {
+      "name": "PancakeSwap",
+      "kind": "dex",
+      "chain": "bsc",
+      "logo": "pancakeswap.svg"
+    },
+    "pancakeswap-v2": {
+      "name": "PancakeSwap",
+      "kind": "dex",
+      "chain": "bsc",
+      "logo": "pancakeswap.svg"
+    },
+    "uniswap-v3": {
+      "name": "Uniswap",
+      "kind": "dex",
+      "chain": "base",
+      "logo": "uniswap.svg"
+    },
+    "uniswap-v2": {
+      "name": "Uniswap",
+      "kind": "dex",
+      "chain": "base",
+      "logo": "uniswap.svg"
+    },
+    "sushiswap-v3": {
+      "name": "SushiSwap",
+      "kind": "dex",
+      "chain": "base",
+      "logo": "sushiswap.svg"
     }
   },
   "factories": {
@@ -60,6 +90,18 @@
     "0xbcfccbde45ce874adcb698cc183debcf17952812": {
       "venue": "pancakeswap-v1",
       "note": "PancakeSwap V1 factory"
+    },
+    "0x33128a8fc17869897dce68ed026d694621f6fdfd": {
+      "venue": "uniswap-v3",
+      "note": "Uniswap V3 factory (Base)"
+    },
+    "0x8909dc15e40173ff4699343b6eb8132c65e18ec6": {
+      "venue": "uniswap-v2",
+      "note": "Uniswap V2 factory (Base)"
+    },
+    "0xc35dadb65012ec5796536bd9864ed8773abc74c4": {
+      "venue": "sushiswap-v3",
+      "note": "SushiSwap V3 factory (Base)"
     }
   }
 }
