@@ -23,8 +23,11 @@ Anomalies (supply, CCIP) are in `anomalies/ANOMALIES.txt`.
 For each finding keep: address (or pool id), chain, name, category, and for a pool its venue. Send the list to Claude, or edit the files yourself:
 
 - `labels/entities.json`: `{"address": "0x...", "chain": "base", "label": "Name", "category": "cex", "source": "where you found it", "logo": ""}` (chain: `all`, `base`, `ethereum`, `bsc` or `polygon`; categories: dex, aggregator, bridge, proxy, liquidity-manager, account-abstraction, cex, team, wallet, system, other)
+  - optional `"entity": "Kraken"`: every address with the same entity is added up in the **Entities** tab of Top Holders (the `label` stays what the tables show for that one address, e.g. `Kraken (0x7DA)`). Exchanges use category `cex`. Team and tokenomics wallets use `team` and are not part of the Entities tab. The pools of one venue are added up under the venue's name automatically.
+  - a token that appears as an « other asset » is named automatically from its contract; to force a name write it in `labels/tokens.json`
 - `labels/pools.json`: one entry per pool: `chain`, `key` (address, or pool id for Uniswap V4 / PancakeSwap Infinity), `name`, `venue`, `kind` (v3, v2, v4, infinity, rfq), tokens, fee, `status`
 - `labels/venues.json`: a new venue (short name, kind, logo)
+- `"not_pools"` (at the end of `labels/pools.json`): addresses the code took for pools (`POOL UNKNW n`) that are something else, e.g. a liquidity manager's proxy: `{"chain": "base", "key": "0x...", "note": "..."}`. They leave the pools at the next run and are never rediscovered; label them in `entities.json` instead. To redo the past of such an address, run **Explorize fix labels** with its address in the `pools` field.
 
 Then commit to `main`. Check that the JSON is valid (GitHub shows a red mark on a syntax error).
 
