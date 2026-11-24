@@ -75,7 +75,8 @@ def run(rec, chain, frm=None):
 
 
 def test_the_registry_reads_the_labels_files():
-    assert len(REG.pools("base")) == 7                                   # the 7 Aerodrome + Aero pools, nothing else
+    assert len(REG.pools("base")) == 13                                  # 7 Aerodrome + Aero, 5 Uniswap, 1 SushiSwap (first list 2026-11-24)
+    assert REG.is_not_pool("base", "0x0851e36d477577cc0f7ec4f796a89213bd83e2bc")      # an Arrakis proxy, not a pool
     assert REG.pool("ethereum", ID_ETH_RIZE).kind == "v4"
     assert REG.pool("bsc", ID_BSC).holder_addr == VAULT                  # Pancake: the Vault holds the tokens
     assert REG.pool("ethereum", ID_ETH_RIZE).holder_addr == MANAGER
