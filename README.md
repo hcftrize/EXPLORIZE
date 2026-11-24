@@ -302,12 +302,13 @@ The page and its API live in the **TOKERIZE** repository; they only read the dat
 
 | File | Folder (TOKERIZE) | What it does in practice |
 |---|---|---|
-| `explorize.html` | `/` | The whole Explorize page: Trades / Liquidity / CCIP, Details (wallet and transaction search), Top Holders, Transfers, price chart. One file of HTML, CSS and JavaScript. |
+| `explorize.html` | `/` | The whole Explorize page: Trades / Liquidity / CCIP, Details (wallet and transaction search), Top Holders and Entities, Transfers, price chart; quick filters (funnel icon in the column headers). One file of HTML, CSS and JavaScript. |
 | `vercel.json` | `/` | Routes `/explorize` to the page and `/api/explorize/*` to the endpoints below. |
 | `status.js` | `api/explorize/` | Indexing state of every chain and the last successful unified update (« updated X min ago »). |
-| `transfers.js` | `api/explorize/` | The Transfers table: raw, or one line per event (trade, liquidity move, bridge message, plain transfer), with filters. |
+| `transfers.js` | `api/explorize/` | The Transfers table: raw, or one line per event (trade, liquidity move, bridge message, plain transfer, CEX IN / CEX OUT / CEX NTRAL), with filters (time, RIZE and USD range, from / to wallet or entity). The USD filter compares the exact value recorded for a trade and amount × current price for every other line. Also answers `?suggest=` for the search boxes of the quick filters. |
 | `market.js` | `api/explorize/` | Trades, liquidity moves, pools and bridge messages for the market tabs. |
 | `wallet.js` | `api/explorize/` | One wallet: balance per chain, governance bonds, label, and the daily balance history for the chart. |
 | `tx.js` | `api/explorize/` | Every RIZE transfer of one transaction. |
 | `holders.js` | `api/explorize/` | The Top Holders ranking, page by page. |
+| `_party.js` | `api/explorize/` | « Who » filters shared by Transfers and Trades: a wallet or an entity (every address tagged with it, and the pools of a venue), plus the name search. |
 | `_db.js`, `_lookups.js`, `_bonds.js` | `api/explorize/` | Shared helpers (read-only database access, name and token lookups, governance bonds). The leading underscore keeps Vercel from exposing them as endpoints. |
