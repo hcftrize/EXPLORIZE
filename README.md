@@ -121,7 +121,7 @@ A typical run with nothing new takes about **30 seconds**. A run that finds new 
 |---|---|---|
 | 1. Transfers | Every chain is synced to its head: new RIZE `Transfer` events are copied into `transfers` (same code as the `sync` command, restarting a few blocks before the checkpoint to absorb reorganisations). | A chain that is not at its head, or a sync cut by the time budget, **blocks** the run. |
 | 2. Supply check | Rebuilds the supply from our transfers (mints minus burns) and compares it with `totalSupply()` read on-chain at the synced block, per chain. | A difference is an **anomaly**, the run goes on. |
-| 3. Market layer | For the new transactions that touch a known pool or venue: fetches the receipt and turns it into a trade or a liquidity move (`trades`, `liquidity_events`). What cannot be proven goes to `enrich_review`. Crashed transactions are retried. Pools are photographed once an hour (`pool_snapshots`). | Trades behind the transfers **block** the run. Unreadable transactions are an **anomaly**. |
+| 3. Market layer | For the new transactions that touch a known pool or venue: fetches the receipt and turns it into a trade or a liquidity move (`trades`, `liquidity_events`). What cannot be proven goes to `enrich_review`. Crashed transactions are retried. Pools are photographed once an hour (`pool_snapshots`). Then the unknown tokens seen in trades are named from their contracts (`tokens`, never blocks). | Trades behind the transfers **block** the run. Unreadable transactions are an **anomaly**. |
 | 4. CCIP bridges | Burns and mints are looked up in the Chainlink CCIP API and every bridge message is reconciled (what was burned on one chain is minted on the other). | A burn or mint old enough to have a message but not yet looked up **blocks** the run (messages still in flight are fine). Messages that do not reconcile are an **anomaly**. |
 | 5. Balances | Reads the live `balanceOf()` of every address touched since the last run, at exactly the synced block, and keeps them in `holder_balances`. | Balances that do not add up to `totalSupply()` are an **anomaly**. |
 | 6. Top Holders | **Once a day** (24 h by default, `RANKING_EVERY_HOURS`): reads every governance bond on Base, adds the held balances and rebuilds the ranking (`holders`, `bonds`, `holders_meta`). The other runs leave the published table untouched; the page shows its own age (« updated 17h ago »). | A failed read **blocks** the run. Governance differences are an **anomaly**. |
@@ -163,7 +163,7 @@ When a run is blocked, the reason is written as one line in `anomalies/ANOMALIES
 | `chain_state` | Per chain: first block, last synced block, block up to which balances are exact | sync, unified | status API |
 | `transfers` | Every RIZE `Transfer` event of the 4 chains | sync, unified | transfers, wallet, tx APIs |
 | `labels` | Names for addresses and pools (wallets, exchanges, bridges, routers…) | `labels/entities.json` and `pools.json`, at every run | all APIs (names) |
-| `pools`, `venues`, `tokens` | The trading pools, venues and tokens known to the market layer | `labels/*.json` and the pools found automatically (`POOL UNKNW n`) | market API |
+| `pools`, `venues`, `tokens` | The trading pools, venues and tokens known to the market layer. A token not in `labels/tokens.json` is named from its own contract (`source = auto`) | `labels/*.json`, the pools found automatically (`POOL UNKNW n`), `tokens.py` | market API |
 | `trades` | One row per proven trade: side, trader, router, RIZE, USD, price, flags | enrich, reprocess | market, transfers APIs |
 | `liquidity_events` | Liquidity adds, removes and fee collections per pool | enrich, reprocess | market API |
 | `pool_snapshots` | What every pool holds, once an hour | enrich (`snapshot`) | market API |
@@ -172,6 +172,7 @@ When a run is blocked, the reason is written as one line in `anomalies/ANOMALIES
 | `ccip_messages`, `ccip_checked` | Chainlink CCIP bridge messages; burns already looked up | ccip | transfers, market APIs |
 | `holder_balances` | Live balance of every address, read on-chain at the synced block (not displayed) | unified | supply/balance checks |
 | `holders`, `holders_meta`, `bonds` | Top Holders ranking, its date and block, and every governance bond | unified, holders | holders, wallet APIs |
+| `entity_holdings`, `entity_members` | The Entities tab: what each known entity (Kraken, MEXC, Aerodrome…) holds, all its addresses added up, and the addresses behind each | unified, holders (same transaction as `holders`) | holders API (`view=entities`, `view=entity`) |
 | `unified_runs` | Journal of every unified run (ok or failed, summary) | unified | status API (« last update ») |
 | `prices_hourly` | Reserved for a price history, not used yet | — | — |
 
@@ -213,7 +214,7 @@ Folders are shown from the root of this repository. The website part lives in th
 |---|---|---|
 | `unified-update-explorize.yml` | Unified update explorize | **The heartbeat.** Runs `python -m indexer unified` (25-minute budget, 75-minute safety limit). Started every 10 minutes by cron-job.org through the GitHub API, never overlaps itself, and its last step commits `anomalies/ANOMALIES.txt`. |
 | `fix-labels-explorize.yml` | Explorize fix labels | After you changed labels or pools: re-reads only the transactions you select and rewrites their trades and review rows. `dry_run` is ticked by default. |
-| `enrich.yml` | Explorize market layer | Manual menu for the market layer: `enrich`, `snapshot`, `discover`, `ccip`, `ccip-gaps`, `repair`, `report`. Used for big catch-ups and diagnoses. |
+| `enrich.yml` | Explorize market layer | Manual menu for the market layer: `enrich`, `snapshot`, `discover`, `ccip`, `ccip-gaps`, `repair`, `tokens`, `report`. Used for big catch-ups and diagnoses. |
 | `sync.yml` | Explorize sync | Transfers only (first sync, or catching up after a long stop). |
 | `backfill.yml` | Explorize backfill | One-off full history of the 4 chains in parallel, from the token deployment blocks. |
 | `holders.yml` | Explorize holders | Manual full rebuild of the Top Holders ranking from the chains. |
@@ -242,6 +243,8 @@ Everything is started with `python -m indexer <command>`; `__main__.py` is the f
 | `venues.py` | Adapters for the venues that are not « one pool = one contract »: Uniswap V4 and PancakeSwap Infinity (pool ids inside a manager contract), DODO private pools, RFQ market makers. |
 | `registry.py` | Loads `labels/*.json` into memory: which addresses and pool ids are RIZE venues, entity names, tokens. Matches by address, never by symbol (impostor « RIZE » tokens exist). |
 | `ccip.py` | Bridge reconciliation: asks the Chainlink CCIP API about every burn, stores the messages, and checks that what was burned on one chain was minted on the other. Also the backlog check used by the unified run. |
+| `entities.py` | The Entities tab: groups addresses by the `entity` field of `labels/entities.json` (and every pool of a venue under the venue's name), adds up what they hold, ranks the entities. Written together with the Top Holders table. Team / tokenomics wallets (category `team`) are left out. |
+| `tokens.py` | Names the « other assets »: every token seen in trades, liquidity moves and pools that nobody named is asked its `symbol()`, `name()` and `decimals()` through Multicall3 on the chain's node. Runs inside every unified run (never blocks it, only looks at what traded since the previous run) and as the command `tokens`, which catches up on the whole history (workflow **Explorize market layer**, command `tokens`). What `labels/tokens.json` says always wins. |
 | `holders.py` | Builds the Top Holders ranking: live `balanceOf` on every chain + governance bonds on Base, written as one atomic snapshot. |
 | `governance.py` | Reads the T-RIZE bonding contract on Base (every bond: owner, bonded, queued, vesting) through Multicall3, and checks it adds up. Also runnable alone as a read-only diagnostic. |
 | `multicall.py` | Reads many contract values in one call through Multicall3 (one failing read never breaks the batch). |
@@ -285,6 +288,8 @@ Run with `TEST_DATABASE_URL=postgresql://… pytest` against a throwaway Postgre
 | `test_market_check.py` | The `trade-check` and `classify` diagnostics. |
 | `test_ccip.py` | Bridge reconciliation against answers shaped like the real CCIP API. |
 | `test_holders.py` | Top Holders: live balances plus bonds, atomic snapshot. |
+| `test_entities.py` | Entities: grouping, venues, exclusions, written with the snapshot; automatic token names; addresses declared « not a pool ». |
+| `test_labels_files.py` | The hand-edited labels files: valid addresses, known categories and venues, no duplicate label for one address. |
 | `test_governance.py` | The governance diagnostic and Multicall3 helpers. |
 | `test_unified.py` | The unified run: one transaction, alignment blocks, anomalies never block, the daily ranking rule. |
 | `test_anomalies.py` | The anomaly file: each anomaly once, grouped by day. |
