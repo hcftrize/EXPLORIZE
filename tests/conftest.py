@@ -16,7 +16,7 @@ def conn():
         pytest.skip("TEST_DATABASE_URL not set (needs a throwaway Postgres)")
     c = db.connect(url)
     with c.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS transfers, chain_state, labels, ccip_messages, prices_hourly, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_checked, venues, tokens, holder_balances, unified_runs, holders, bonds, holders_meta CASCADE")
+        cur.execute("DROP TABLE IF EXISTS transfers, chain_state, labels, ccip_messages, prices_hourly, pools, trades, liquidity_events, pool_snapshots, enrich_state, enrich_review, ccip_checked, venues, tokens, holder_balances, unified_runs, holders, bonds, holders_meta, entity_holdings, entity_members CASCADE")
     c.commit()
     db.init_schema(c)
     yield c
