@@ -161,6 +161,16 @@ def refine(r: Recon, vi: VenueInputs, chain: str, reg: Registry, rize: str) -> R
                 gross[t] = gross.get(t, 0) + x
         r.gross_counter = gross
         r.pool_rize = sum(f["rize"] * f["dir"] for f in r.fills)
+    # A holder that swaps AND moves liquidity in the same transaction (a liquidity manager rebalancing a V4 / Infinity position):
+    # its net RIZE is swap + liquidity, so the side read from the nets can be the opposite of the swap. The swap events are exact
+    # (the fills above come from them): the side is theirs.
+    mixed = set(by_holder) & {singles[m.pool].holder_addr for m in vi.modifies}
+    if mixed and r.fills:
+        net = sum(f["rize"] * f["dir"] for f in r.fills)                # + the pools received RIZE: a sale
+        r.verdict = "sell" if net > 0 else "buy" if net < 0 else "arbitrage"
+        venues = {f["pool"] for f in r.fills} | set(r.venues)
+        r.traders = sorted(a for a, n in r.nets.items() if a not in venues and a != ZERO and n.get(rize))
+        r.note = (r.note + "; " if r.note else "") + "swap and liquidity move share the holder: the side is read from the swap events"
     for m in vi.modifies:
         r.liquidity.append({"pool": m.pool, "log": m.log_index, "tick_lower": m.tick_lower, "tick_upper": m.tick_upper,
                             "delta": m.delta, "salt": m.salt,
