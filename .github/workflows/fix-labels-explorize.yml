@@ -7,7 +7,9 @@ name: Explorize fix labels
 # into main  2) run this workflow once with "dry_run" ticked: it says how many transactions would be re-read  3) run it again
 # without dry_run.  Names alone (entities, pool names, venues) need NO correction: they show up at the next unified run.
 #
-# Selectors add up. Leave a field empty to skip it. Not scheduled; it never blocks the unified run: each batch is written
+# Selectors add up (a field left empty, or a box left unticked, is skipped). To correct a way of READING transactions (not a label), tick
+# lp_txs and/or outliers: the rows already rewritten carry a marker and leave the selection, so an interrupted run continues where it stopped.
+# Not scheduled; it never blocks the unified run: each batch is written
 # under the unified run's lock (it waits for a unified run in progress, then writes for a fraction of a second).
 on:
   workflow_dispatch:
@@ -30,6 +32,14 @@ on:
       txs:
         description: "Special cases: transaction hashes (comma-separated)"
         default: ""
+      lp_txs:
+        description: "Re-read EVERY transaction with liquidity moves that an older reading stored (liquidity managers like the Proxy Beacon, any pool). Resumable: run it again until it says 0 to re-read"
+        type: boolean
+        default: false
+      outliers:
+        description: "Re-read the trades of an older reading priced more than 3x above or below the median of their day (resumable)"
+        type: boolean
+        default: false
       use_file:
         description: "Also re-read the transactions listed in corrections/transactions.txt"
         type: boolean
@@ -58,6 +68,8 @@ jobs:
       ADDRESSES: ${{ inputs.addresses }}
       FLAGS: ${{ inputs.flags }}
       TXS: ${{ inputs.txs }}
+      LP_TXS: ${{ inputs.lp_txs }}
+      OUTLIERS: ${{ inputs.outliers }}
       USE_FILE: ${{ inputs.use_file }}
       DRY_RUN: ${{ inputs.dry_run }}
       MAX_MINUTES: ${{ inputs.max_minutes }}
@@ -78,6 +90,8 @@ jobs:
           if [ -n "$ADDRESSES" ]; then ARGS+=(--address "$ADDRESSES"); fi
           if [ -n "$FLAGS" ];     then ARGS+=(--flags "$FLAGS"); fi
           if [ -n "$TXS" ];       then ARGS+=(--tx "$TXS"); fi
+          if [ "$LP_TXS" = "true" ];   then ARGS+=(--lp-txs); fi
+          if [ "$OUTLIERS" = "true" ]; then ARGS+=(--outliers); fi
           if [ "$USE_FILE" = "true" ]; then ARGS+=(--tx-file corrections/transactions.txt); fi
           if [ "$DRY_RUN" = "true" ];  then ARGS+=(--dry-run); fi
           python -u -m indexer reprocess "${ARGS[@]}"
