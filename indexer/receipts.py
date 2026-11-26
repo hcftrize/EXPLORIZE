@@ -117,6 +117,7 @@ class Recon:
     flags: list = field(default_factory=list)      # things worth a human look (an unexplained venue balance, a mismatch)
     liquidity: list = field(default_factory=list)  # decoded liquidity moves of singleton pools (ModifyLiquidity)
     venue_checks: list = field(default_factory=list)  # (holder, event total, net total, ok): events vs token movements
+    lp_set_aside: list = field(default_factory=list)  # (pool, log_index, token, from, to, amount): liquidity flows kept out of a trade's nets
 
 
 @dataclass
@@ -201,6 +202,42 @@ def parse_logs(receipt: dict, wrapped: str) -> Parsed:
     return Parsed(nets, transfers, pools, seen, swaps, lp, lp_events, n_in, n_out, other)
 
 
+def _liquidity_transfers(P: Parsed) -> tuple[list, list]:
+    """The token transfers that belong to a pool's own liquidity events, found by log order.
+
+    A pool pays out or pulls in the tokens of a liquidity move just BEFORE it emits the event: the transfers into the pool
+    that precede its Mint event, the transfers out of it that precede its Collect event (and its V2 Burn event). Between
+    the previous event of the same pool and the event itself, the transfers that touch the pool in the right direction
+    and add up to the amounts of the event are those flows. Nothing else is taken: when the amounts do not add up the
+    transfers stay where they are and the case is reported as unmatched.
+
+    Returns (taken, unmatched): taken = [(pool, log_index, token, from, to, amount)], unmatched = [(pool, log_index, kind)]."""
+    events: dict[str, list[int]] = {}
+    for pool, idx, *_ in P.swaps:
+        events.setdefault(pool, []).append(idx)
+    for pool, idx, *_ in P.lp_events:
+        events.setdefault(pool, []).append(idx)
+    taken, unmatched, used = [], [], set()
+    for pool, idx, kind, a0, a1 in sorted(P.lp_events, key=lambda e: e[1]):
+        want = sorted(a for a in (a0, a1) if a)
+        if not want:
+            continue                                                 # a position "poke" with nothing in it
+        prev = max((i for i in events[pool] if i < idx), default=-1)
+        into = kind == "mint"
+        cand = [t for t in P.transfers if prev < t[0] < idx and t[0] not in used
+                and ((t[3] == pool) if into else (t[2] == pool))]
+        sums: dict[str, int] = {}
+        for t in cand:
+            sums[t[1]] = sums.get(t[1], 0) + t[4]
+        if sorted(v for v in sums.values() if v) == want:
+            for t in cand:
+                used.add(t[0])
+                taken.append((pool, t[0], t[1], t[2], t[3], t[4]))
+        elif kind != "burn":                                         # a V3 Burn moves no tokens by itself: only its Collect does
+            unmatched.append((pool, idx, kind))
+    return taken, unmatched
+
+
 def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None = None, tx_value: int = 0,
               venue_addrs=None, lp_extra=None, known_pools=None) -> Recon:
     """venue_addrs: addresses KNOWN to be venues in this transaction although they emit no classic Swap event
@@ -213,6 +250,21 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
     P = parse_logs(receipt, wrapped)
     nets, lp = P.nets, P.lp
     pools = set(P.pools) | {a.lower() for a in (venue_addrs or ())}
+    aside: list = []
+    unmatched: list = []
+    if pools and P.lp_events:
+        # A transaction that swaps AND moves liquidity (a liquidity manager rebalancing: collect, swap, mint): the pool's
+        # net RIZE is swap + mint - collect, which is neither the trade nor the move. The tokens of the liquidity events are
+        # set aside, so what is left in the nets is the swap alone.
+        aside, unmatched = _liquidity_transfers(P)
+        for _pool, _idx, token, frm, to, amount in aside:
+            for a, sign in ((frm, 1), (to, -1)):
+                d = nets.setdefault(a, {})
+                d[token] = d.get(token, 0) + sign * amount
+        for a in list(nets):
+            nets[a] = {t: v for t, v in nets[a].items() if v != 0}
+            if not nets[a]:
+                del nets[a]
     if pools:
         pools |= {a.lower() for a in (known_pools or ()) if nets.get(a.lower(), {}).get(rize)}
     for a, kinds in (lp_extra or {}).items():
@@ -220,8 +272,10 @@ def reconcile(receipt: dict, rize: str, wrapped: str = "", tx_from: str | None =
     r = Recon(verdict="unknown", nets=nets, transfers=sorted(P.transfers), swap_pools=sorted(pools),
               swap_count=len(P.swaps), swaps=sorted(P.swaps, key=lambda x: x[1]), lp_pools=lp,
               lp_events=sorted(P.lp_events, key=lambda x: x[1]), native_in=P.native_in, native_out=P.native_out,
-              tx_value=tx_value,
+              tx_value=tx_value, lp_set_aside=sorted(aside, key=lambda x: x[1]),
               other_events=sorted((k[0], k[1], v[0], v[1], v[2]) for k, v in P.other.items()))
+    for pool, idx, kind in unmatched:
+        r.flags.append(f"liquidity_flows_unmatched:{pool[:10]} {kind} event at log {idx} does not match the transfers before it")
     rz = {a: n[rize] for a, n in nets.items() if n.get(rize)}              # parties with a net RIZE change
     others = lambda a: {t: v for t, v in nets.get(a, {}).items() if t != rize}  # noqa: E731
     moved = {a for a in P.seen if a != ZERO}
@@ -405,7 +459,7 @@ def swap_check(r: Recon, pool_tokens: dict, short=lambda a: a) -> list[str]:
             continue
         e0, e1 = sum(a for a, _ in evs), sum(b for _, b in evs)
         t0, t1 = r.nets.get(pool, {}).get(toks[0], 0), r.nets.get(pool, {}).get(toks[1], 0)
-        if pool in r.lp_pools:
+        if pool in r.lp_pools and not any(x[0] == pool for x in r.lp_set_aside):
             out.append(f"   {short(pool)}: swap events AND liquidity events in the same tx; not compared")
         else:
             ok = (e0 == t0 and e1 == t1)
@@ -532,6 +586,12 @@ def report(r: Recon, rize: str, meta: dict, short=lambda a: a, stables=None, bri
     elif r.verdict == "transfer":
         out.append("From: " + ", ".join(short(a) for a in r.traders) + "   To: " + ", ".join(short(a) for a in r.venues))
 
+    if r.lp_set_aside:
+        tot: dict = {}
+        for _pool, _idx, token, _frm, _to, x in r.lp_set_aside:
+            tot[token] = tot.get(token, 0) + x
+        out.append("Liquidity flows set aside (Mint / Collect of a pool in a transaction that also swaps; not part of the trade): "
+                   + ", ".join(amt(t, x) for t, x in tot.items()))
     if r.fills:
         out.append(f"Fills ({len(r.fills)}):")
         for i, f in enumerate(r.fills, 1):
