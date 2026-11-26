@@ -43,3 +43,13 @@ A name never needs this. These cases do: a pool or pool id added to `pools.json`
 2. Then without `dry_run`. It re-reads only the selected transactions and rewrites their trades, liquidity moves and review rows, then prints what changed ("became trades", "left review", "waiting for review: guess 40 -> 12").
 
 Fields (all optional, they add up): `reasons` (review queue), `pools` (address or id, the first 18 characters of an id are enough), `addresses` (routers / relayers / traders), `flags` (for example `price-implausible`), `txs` (hashes), `use_file` (the list in `corrections/transactions.txt`). A transaction that stays a guess is normal when nothing proves its venue: a trade needs a Swap event the code recognises.
+
+### When the code changed how transactions are READ (not a label): `lp_txs` and `outliers`
+
+A liquidity manager (the Proxy Beacon, an Arrakis or Gamma proxy, a JIT bot...) collects its position, swaps and mints again in ONE transaction. An older reading mixed the three in the pool's balance and stored a wrong trade (side, amount, price) and a doubled removal. The current reading keeps the liquidity flows out of the trade. To redo the whole history, whoever the address is:
+
+1. Run **Explorize fix labels** with `reasons` = `none`, `lp_txs` ticked and `dry_run` ticked: it says how many transactions carry liquidity moves stored by an older reading.
+2. Run it again without `dry_run`. Every row it rewrites carries a marker (`rv`), so the transactions already done leave the selection. If the time budget runs out ("run the correction again to continue"), simply run it again: it continues where it stopped, until the dry run says 0.
+3. Then the same with `outliers` ticked instead of `lp_txs`: trades priced more than 3 times above or below the median price of their day, stored by an older reading (a wrong reading with no liquidity move recorded next to it).
+
+To see who these managers are and what remains, `review_queries.sql`: query 16 (liquidity managers, how many of their transactions also swap, how many are still on the old reading), 17 (what an older reading still holds: 0 everywhere = done), 18 (trades far from the price of their day; `read_by_new_code = true` means the current code kept them: real odd trades).
