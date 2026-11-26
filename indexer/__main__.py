@@ -123,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--flags", default=None, help="reprocess: trade flags to re-read (comma-separated, e.g. price-implausible)")
     p.add_argument("--tx", default=None, help="reprocess: transaction hashes (comma-separated, or 'chain hash' one per line)")
     p.add_argument("--tx-file", default=None, help="reprocess: text file with one transaction per line")
+    p.add_argument("--lp-txs", action="store_true", help="reprocess: every transaction with liquidity moves stored by an older reading (resumable)")
+    p.add_argument("--outliers", action="store_true", help="reprocess: trades of an older reading priced far from the median of their day (resumable)")
     p.add_argument("--dry-run", action="store_true", help="reprocess: only say what would be re-read")
     args = p.parse_args(argv)
     chains = config.select_chains(args.chain)
@@ -176,11 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     selection = None
     if args.command == "reprocess":
         from .reprocess import build_selection
-        selection = build_selection(args.reasons, args.pool, args.address, args.flags, args.tx, args.tx_file)
+        selection = build_selection(args.reasons, args.pool, args.address, args.flags, args.tx, args.tx_file,
+                                      lp_txs=args.lp_txs, outliers=args.outliers)
         if selection.empty():
-            raise SystemExit("reprocess: nothing selected (give --reasons, --pool, --address, --flags, --tx or --tx-file)")
+            raise SystemExit("reprocess: nothing selected (give --reasons, --pool, --address, --flags, --tx, --tx-file, --lp-txs or --outliers)")
         log(f"reprocess: reasons={list(selection.reasons)} pools={list(selection.pools)} addresses={list(selection.addresses)} "
-            f"flags={list(selection.flags)} listed transactions={len(selection.txs)}{' (dry run)' if args.dry_run else ''}")
+            f"flags={list(selection.flags)} listed transactions={len(selection.txs)} lp_txs={selection.lp_txs} outliers={selection.outliers}"
+            f"{' (dry run)' if args.dry_run else ''}")
     for c in chains:
         try:
             client = None if (args.command == "reprocess" and args.dry_run) else make_client(c)     # a dry run never calls the node
