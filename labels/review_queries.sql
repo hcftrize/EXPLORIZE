@@ -103,11 +103,16 @@ SELECT t.chain_id, '0x' || encode(t.address, 'hex') AS token, t.symbol, t.name, 
 
 
 -- 16. Liquidity managers (proxies, vaults, bots): who moves liquidity, how many of their transactions ALSO swap (these are the ones
---     a rebalance can fool), and how many were stored by an older reading (old_reading > 0 = run "Explorize fix labels" with lp_txs).
+--     a rebalance can fool), and how many are still to correct (to_correct > 0 = run "Explorize fix labels" with lp_txs).
+WITH todo AS (          -- the transactions the current reading can change and an older reading stored (what lp_txs selects)
+  SELECT l.chain_id, l.tx_hash FROM liquidity_events l GROUP BY l.chain_id, l.tx_hash
+  HAVING bool_or(NOT (l.detail ? 'rv'))
+     AND (bool_or(l.kind = 'collect') OR (bool_or(l.kind = 'add') AND bool_or(l.kind = 'remove'))
+          OR EXISTS (SELECT 1 FROM trades t WHERE t.chain_id = l.chain_id AND t.tx_hash = l.tx_hash)))
 SELECT l.chain_id, '0x' || encode(l.provider, 'hex') AS provider, coalesce(lb.label, '') AS label,
        count(DISTINCT l.tx_hash) AS lp_txs,
        count(DISTINCT l.tx_hash) FILTER (WHERE EXISTS (SELECT 1 FROM trades t WHERE t.chain_id = l.chain_id AND t.tx_hash = l.tx_hash)) AS also_swap,
-       count(DISTINCT l.tx_hash) FILTER (WHERE NOT (l.detail ? 'rv')) AS old_reading,
+       count(DISTINCT l.tx_hash) FILTER (WHERE EXISTS (SELECT 1 FROM todo d WHERE d.chain_id = l.chain_id AND d.tx_hash = l.tx_hash)) AS to_correct,
        min(l.block_time)::date AS first_seen, max(l.block_time)::date AS last_seen
   FROM liquidity_events l
   LEFT JOIN LATERAL (SELECT label FROM labels WHERE address = l.provider AND chain_id IN (0, l.chain_id) ORDER BY chain_id DESC LIMIT 1) lb ON true
@@ -115,11 +120,22 @@ SELECT l.chain_id, '0x' || encode(l.provider, 'hex') AS provider, coalesce(lb.la
  ORDER BY also_swap DESC, lp_txs DESC
  LIMIT 30;
 
--- 17. What an older reading still holds (0 everywhere = the whole history has been read by the current code).
-SELECT chain_id, 'transactions with liquidity moves, old reading' AS what, count(DISTINCT tx_hash) AS n
-  FROM liquidity_events WHERE NOT (detail ? 'rv') GROUP BY 1
+-- 17. What is still to correct (0 everywhere = the whole history has been read by the current code). The first line is exactly
+--     what "Explorize fix labels" with lp_txs selects; the second is what outliers selects (trades priced far from their day).
+WITH todo AS (
+  SELECT l.chain_id, l.tx_hash FROM liquidity_events l GROUP BY l.chain_id, l.tx_hash
+  HAVING bool_or(NOT (l.detail ? 'rv'))
+     AND (bool_or(l.kind = 'collect') OR (bool_or(l.kind = 'add') AND bool_or(l.kind = 'remove'))
+          OR EXISTS (SELECT 1 FROM trades t WHERE t.chain_id = l.chain_id AND t.tx_hash = l.tx_hash))),
+day AS (
+  SELECT chain_id, date_trunc('day', block_time) AS d, percentile_cont(0.5) WITHIN GROUP (ORDER BY price_usd) AS med
+    FROM trades WHERE price_usd IS NOT NULL GROUP BY 1, 2)
+SELECT chain_id, 'lp_txs: liquidity transactions to correct' AS what, count(*) AS n FROM todo GROUP BY 1
 UNION ALL
-SELECT chain_id, 'trades, old reading', count(*) FROM trades WHERE NOT (extra ? 'rv') GROUP BY 1
+SELECT t.chain_id, 'outliers: trades far from their day, not re-read', count(*)
+  FROM trades t JOIN day ON day.chain_id = t.chain_id AND day.d = date_trunc('day', t.block_time)
+ WHERE t.price_usd IS NOT NULL AND NOT (t.extra ? 'rv') AND day.med > 0 AND (t.price_usd > 3 * day.med OR t.price_usd < day.med / 3)
+ GROUP BY 1
 ORDER BY 1, 2;
 
 -- 18. Trades more than 3x above or below the median price of their chain that day (a wrong reading leaves these behind).
