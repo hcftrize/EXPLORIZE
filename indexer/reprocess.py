@@ -17,9 +17,11 @@ the same code as the enrichment (idempotent: running it twice changes nothing mo
               when it is a registered pool or venue address, also every stored transfer that touches it
   --flags     trades carrying one of these flags (for instance price-implausible)
   --tx / --tx-file   an explicit list of transactions (the special cases): a hash, or "chain hash", one per line, # = comment
-  --lp-txs    every transaction that has liquidity moves (any provider, any pool: a liquidity manager like the Proxy Beacon,
-              a plain add / remove) and was stored by an older reading (no "rv" marker). A rewritten transaction carries the
-              marker and leaves the selection: an interrupted run is simply started again and continues where it stopped.
+  --lp-txs    the transactions with liquidity moves (any provider, any pool: a liquidity manager like the Proxy Beacon, a JIT
+              bot, a plain remove) that the current reading can change, stored by an older reading (no "rv" marker): a trade is
+              stored next to the liquidity moves, or a Collect follows a Burn, or an add and a remove come together. Plain adds
+              are not read again. A rewritten transaction carries the marker and leaves the selection: an interrupted run is
+              simply started again and continues where it stopped. Newest transactions first.
   --outliers  trades stored by an older reading whose price is more than 3 times above or below the median price of their
               chain that day: the ones a wrong reading leaves behind when no liquidity move was recorded next to them
 
@@ -117,7 +119,7 @@ def _rows(cur) -> list[tuple[str, int, object]]:
 
 
 def select_txs(conn, chain, reg: Registry, sel: Selection, log=print) -> tuple[list[tuple[str, int, object]], dict]:
-    """The transactions of this chain to re-read: [(hash, block, time)] by block, and how many each selector brought."""
+    """The transactions of this chain to re-read: [(hash, block, time)] newest first, and how many each selector brought."""
     cid = chain.chain_id
     found: dict[str, tuple[str, int, object]] = {}
     per: Counter = Counter()
@@ -168,8 +170,14 @@ def select_txs(conn, chain, reg: Registry, sel: Selection, log=print) -> tuple[l
                             (cid, _bin(a), _bin(a)))
                 add("address", _rows(cur))
         if sel.lp_txs:
-            cur.execute("""SELECT DISTINCT encode(tx_hash,'hex'), block_number, block_time FROM liquidity_events
-                            WHERE chain_id = %s AND NOT (detail ? 'rv')""", (cid,))
+            # Only the transactions the current reading can change: a trade stored next to the liquidity moves (a swap shares the
+            # transaction), a Collect (it was counted on top of its Burn), or an add AND a remove together (a rebalance, a JIT bot).
+            # A plain add, a remove with no Collect and a lone fee collection read the same with both readings: left alone.
+            cur.execute("""SELECT encode(l.tx_hash,'hex'), min(l.block_number), min(l.block_time) FROM liquidity_events l
+                            WHERE l.chain_id = %s GROUP BY l.tx_hash
+                           HAVING bool_or(NOT (l.detail ? 'rv'))
+                              AND (bool_or(l.kind = 'collect') OR (bool_or(l.kind = 'add') AND bool_or(l.kind = 'remove'))
+                                   OR EXISTS (SELECT 1 FROM trades t WHERE t.chain_id = %s AND t.tx_hash = l.tx_hash))""", (cid, cid))
             add("lp_txs", _rows(cur))
         if sel.outliers:
             cur.execute("""WITH day AS (
@@ -202,7 +210,7 @@ def select_txs(conn, chain, reg: Registry, sel: Selection, log=print) -> tuple[l
             log(f"[{chain.key}] {h}: no stored RIZE transfer on this chain (nothing to re-read)")
     if skipped:
         log(f"[{chain.key}] {skipped} selected rows have no stored transfer to take the time from: skipped")
-    rows = sorted(found.values(), key=lambda x: (x[1], x[0]))
+    rows = sorted(found.values(), key=lambda x: (x[1], x[0]), reverse=True)        # newest first: what people look at is corrected first
     return rows, dict(per)
 
 
