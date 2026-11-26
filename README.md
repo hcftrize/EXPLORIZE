@@ -42,7 +42,7 @@ Repository secrets (**Settings > Secrets and variables > Actions**):
 | **Explorize backfill** | One-off full history of the 4 chains in parallel. Resumable: run it again if it stops. Needs an archive node (dRPC Pay As You Go). |
 | **Explorize sync** | Transfers only. Used for the first sync and for catching up after a long stop; the unified update does this step by itself in normal life. |
 | **Explorize market layer** | Turns the synced transfers into trades and liquidity moves (`enrich`), photographs the pools (`snapshot`), finds unlisted RIZE pools (`discover`), reconciles the bridges with the Chainlink CCIP API (`ccip`, `ccip-gaps`), repairs crashed transactions (`repair`) and prints a `report`. Resumable. Used for big catch-ups; the unified update does the same work in small steps. |
-| **Explorize fix labels** | Corrects the past after a label change: re-reads only the transactions you point at (review queue, a new pool, a router, a flag, a list of hashes) and rewrites their trades and review rows. `dry_run` first. See `labels/WORKFLOW.md`. |
+| **Explorize fix labels** | Corrects the past after a label change: re-reads only the transactions you point at (review queue, a new pool, a router, a flag, a list of hashes; or, after a change of the reading code, every transaction with liquidity moves stored by an older reading: `lp_txs`, and trades priced far from their day's median: `outliers`; both resumable) and rewrites their trades and review rows. `dry_run` first. See `labels/WORKFLOW.md`. |
 | **Explorize holders** | Full rebuild of the Top Holders ranking, by hand. The unified update already rebuilds it once a day. |
 | **Explorize verify** | Supply integrity check and per-chain status (also balances against `balanceOf()`). Do not run it during a sync. |
 | Explorize balance, inspect, market check, governance check | Read-only diagnostics (a balance at chosen blocks, window-width comparison, how a transaction is read, the governance contract). They write nothing. |
@@ -238,8 +238,8 @@ Everything is started with `python -m indexer <command>`; `__main__.py` is the f
 | `rpc.py` | The JSON-RPC client: throttling, retries, batching, limit detection. Error messages never contain the URL (it contains the API key). |
 | `config.py` | Reads `config/chains.json` and the environment (`DRPC_API_KEY`, `DATABASE_URL`, optional `RPC_URL_<CHAIN>`, `RPC_MAX_RPS`, `RPC_BATCH_SIZE`, `LOG_CAP`). |
 | `db.py` | Everything about Postgres: connection, schema creation, the **staged connection** (all writes of a run stay invisible until `publish()`, `abort()` throws them away), advisory locks, writing a block range with its checkpoint, supply and balance helpers. |
-| `enrich.py` | The market layer: turns a transaction receipt into a trade or liquidity rows, writes them (replacing what was stored for that transaction), keeps its checkpoint, photographs pools, discovers unknown pools, repairs crashed transactions, prints the `report`, and holds the lock helper used by corrections. |
-| `receipts.py` | Reads one transaction like a bank statement: net gain or loss per address and per token, to find who really traded, which pools filled it, fees and relays, and the kind of move (buy, sell, arbitrage, liquidity, transfer). |
+| `enrich.py` | The market layer: turns a transaction receipt into a trade or liquidity rows (a Collect only counts the fees beyond what a Burn already released), writes them (replacing what was stored for that transaction), keeps its checkpoint, photographs pools, discovers unknown pools, repairs crashed transactions, prints the `report`, and holds the lock helper used by corrections. |
+| `receipts.py` | Reads one transaction like a bank statement: net gain or loss per address and per token, to find who really traded, which pools filled it, fees and relays, and the kind of move (buy, sell, arbitrage, liquidity, transfer). In a transaction that swaps AND moves liquidity (a liquidity manager rebalancing: collect, swap, mint) the tokens of the pool's own Mint / Collect events are set aside by log order, so the trade is the swap alone. |
 | `venues.py` | Adapters for the venues that are not « one pool = one contract »: Uniswap V4 and PancakeSwap Infinity (pool ids inside a manager contract), DODO private pools, RFQ market makers. |
 | `registry.py` | Loads `labels/*.json` into memory: which addresses and pool ids are RIZE venues, entity names, tokens. Matches by address, never by symbol (impostor « RIZE » tokens exist). |
 | `ccip.py` | Bridge reconciliation: asks the Chainlink CCIP API about every burn, stores the messages, and checks that what was burned on one chain was minted on the other. Also the backlog check used by the unified run. |
@@ -248,7 +248,7 @@ Everything is started with `python -m indexer <command>`; `__main__.py` is the f
 | `holders.py` | Builds the Top Holders ranking: live `balanceOf` on every chain + governance bonds on Base, written as one atomic snapshot. |
 | `governance.py` | Reads the T-RIZE bonding contract on Base (every bond: owner, bonded, queued, vesting) through Multicall3, and checks it adds up. Also runnable alone as a read-only diagnostic. |
 | `multicall.py` | Reads many contract values in one call through Multicall3 (one failing read never breaks the batch). |
-| `reprocess.py` | The targeted correction behind **Explorize fix labels**: selects transactions (review queue, pool, address, flag, list of hashes), re-reads them, rewrites their rows, tells what changed. |
+| `reprocess.py` | The targeted correction behind **Explorize fix labels**: selects transactions (review queue, pool, address, flag, list of hashes, `lp_txs`, `outliers`; the rows it writes carry the reading version `rv`, which makes a long run resumable), re-reads them, rewrites their rows, tells what changed. |
 | `anomalies.py` | Writes `anomalies/ANOMALIES.txt`: each anomaly once, grouped by day, identified by a key so it is never repeated. |
 | `checks.py` | The diagnostics behind `probe`, `verify`, `verify-balances`, `inspect`, `balance`, `status`. |
 | `market_check.py` | The diagnostics `trade-check` and `classify` (read-only). |
@@ -284,6 +284,7 @@ Run with `TEST_DATABASE_URL=postgresql://… pytest` against a throwaway Postgre
 | `test_e2e_http.py` | The whole path command line → RPC client → fake node → Postgres. |
 | `test_receipts.py` | Transaction reading: sells, buys, arbitrage, fees, relays, liquidity (modelled on real transactions). |
 | `test_venues.py` | Uniswap V4, PancakeSwap Infinity, DODO and RFQ readings, with real amounts. |
+| `test_beacon_rebalance.py` | The 12 real rebalances of the Proxy Beacon (collect, swap on one or two pools, mint): the trade is the swap alone, the liquidity lines do not count a Burn and its Collect twice. |
 | `test_enrich.py` | Receipt → stored rows, checkpointed job, repair, names written from the labels files. |
 | `test_market_check.py` | The `trade-check` and `classify` diagnostics. |
 | `test_ccip.py` | Bridge reconciliation against answers shaped like the real CCIP API. |
@@ -294,6 +295,7 @@ Run with `TEST_DATABASE_URL=postgresql://… pytest` against a throwaway Postgre
 | `test_unified.py` | The unified run: one transaction, alignment blocks, anomalies never block, the daily ranking rule. |
 | `test_anomalies.py` | The anomaly file: each anomaly once, grouped by day. |
 | `test_reprocess.py` | The targeted correction: selectors, dry run, rewrite after a label change, shared lock. |
+| `test_lp_managers.py` | Every shape of swap + liquidity move in one transaction (V2 burn, JIT bot, unregistered pool, V4 holder), and the whole-history correction: marker, resumable `lp_txs`, `outliers`. |
 | `__init__.py` | Marks the folder as a Python package. |
 
 ## The website side (repository TOKERIZE)
