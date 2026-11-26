@@ -37,6 +37,11 @@ WINDOW_BLOCKS = {"base": 20000, "ethereum": 5000, "bsc": 50000, "polygon": 20000
 STORAGE_LIMIT_MB = config.env_int("STORAGE_LIMIT_MB", 900)
 STORAGE_LIMIT_SOURCE = "set by the STORAGE_LIMIT_MB variable" if os.environ.get("STORAGE_LIMIT_MB") else "built-in default: STORAGE_LIMIT_MB is not set"
 RECEIPT_CHUNK = 60                # transactions fetched per round
+# Version of the way a transaction is read. Every trade and liquidity row written carries it ("rv" in `extra` / `detail`), so a
+# correction can find the rows written by an older reading (no marker) and, once rewritten, stops finding them: a long
+# correction can be interrupted and run again, it continues where it stopped.
+#   2 = the liquidity flows of a transaction that also swaps are kept out of the trade; a Collect no longer counts the tokens of the Burn before it
+READING = 2
 
 
 def hx(a: str) -> bytes:
@@ -178,13 +183,26 @@ def _trade_row(chain, reg, r: Recon, frm, to, value, meta, stables, rize) -> dic
 def _liquidity_rows(chain, reg, r: Recon, frm, rize) -> list[dict]:
     rows = []
     provider = (r.traders[0] if r.traders else frm) or None
+    owed: dict = {}                                              # pool -> [RIZE, counter] of burns not collected yet
     for pool, idx, kind, a0, a1 in r.lp_events:                  # classic pools: amounts come from the event itself
         p = reg.pool(chain, pool)
         if p is None or a0 is None or not (p.token0 and p.token1) or rize not in (p.token0, p.token1):
             continue
         ra, ca = (a0, a1) if p.token0 == rize else (a1, a0)
+        if kind == "burn":
+            o = owed.setdefault(pool, [0, 0])
+            o[0] += ra
+            o[1] += ca
+        elif kind == "collect":
+            # A V3 Collect hands out what a Burn just released PLUS the fees. The released part is already counted by the
+            # Burn row: only the rest (the fees) is a collection of its own, or the same tokens would be counted twice.
+            o = owed.setdefault(pool, [0, 0])
+            take_r, take_c = min(o[0], ra), min(o[1], ca)
+            o[0] -= take_r
+            o[1] -= take_c
+            ra, ca = ra - take_r, ca - take_c
         if not ra and not ca:
-            continue                                            # a position "poke" with nothing in it
+            continue                                            # a position "poke" with nothing in it, or fully a Burn's tokens
         sign = 1 if kind == "mint" else -1
         rows.append({"seq": idx, "pool": pool, "kind": {"mint": "add", "burn": "remove", "collect": "collect"}[kind],
                      "provider": provider, "rize": sign * ra,
@@ -312,11 +330,11 @@ def write_results(conn, chain_id: int, items: list[tuple[str, int, object, Built
                                psycopg2.Binary(hx(t["sender"])) if t["sender"] else None,
                                psycopg2.Binary(hx(t["router"])) if t["router"] else None, t["rize"],
                                json.dumps(t["counter"]), t["usd"], t["price_usd"], json.dumps(t["fills"]), t["swap_count"],
-                               t["tags"], t["flags"], json.dumps(t["extra"])))
+                               t["tags"], t["flags"], json.dumps({**t["extra"], "rv": READING})))
             for L in b.liquidity:
                 liqs.append((chain_id, hb, L["seq"], block, ts, psycopg2.Binary(key_bytes(L["pool"])), L["kind"],
                              psycopg2.Binary(hx(L["provider"])) if L["provider"] else None, L["rize"],
-                             json.dumps(L["counter"]), json.dumps(L["detail"])))
+                             json.dumps(L["counter"]), json.dumps({**L["detail"], "rv": READING})))
             if b.review:
                 v = b.review
                 reviews.append((chain_id, hb, block, v["reason"], v["verdict"], v["rize"], v["detail"]))
