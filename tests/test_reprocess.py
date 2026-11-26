@@ -144,7 +144,7 @@ def test_a_dry_run_reads_nothing_and_writes_nothing(conn):
 def test_an_explicit_list_and_the_chain_in_it(conn):
     chain, reg, node = _guess_setup(conn)
     here = reprocess.select_txs(conn, chain, reg, reprocess.Selection(txs=[(None, TX_GUESS), ("ethereum", TX_OTHER)]), lambda m: None)
-    assert [h for h, *_ in here[0]] == [TX_GUESS, TX_OTHER] and here[1] == {"list": 2}
+    assert [h for h, *_ in here[0]] == [TX_OTHER, TX_GUESS] and here[1] == {"list": 2}      # newest block first
     elsewhere = reprocess.select_txs(conn, chain, reg, reprocess.Selection(txs=[("bsc", TX_GUESS)]), lambda m: None)
     assert elsewhere[0] == []                                          # named for another chain: not read here
     unknown = reprocess.select_txs(conn, chain, reg, reprocess.Selection(txs=[(None, "0x" + "ee" * 32)]), lambda m: None)
