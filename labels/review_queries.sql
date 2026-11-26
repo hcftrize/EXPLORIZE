@@ -100,3 +100,37 @@ SELECT t.chain_id, '0x' || encode(t.address, 'hex') AS token, t.symbol, t.name, 
  WHERE t.source IN ('auto', 'unreadable')
  GROUP BY t.chain_id, t.address, t.symbol, t.name, t.decimals, t.source
  ORDER BY uses_in_trades_and_liquidity DESC, t.chain_id;
+
+
+-- 16. Liquidity managers (proxies, vaults, bots): who moves liquidity, how many of their transactions ALSO swap (these are the ones
+--     a rebalance can fool), and how many were stored by an older reading (old_reading > 0 = run "Explorize fix labels" with lp_txs).
+SELECT l.chain_id, '0x' || encode(l.provider, 'hex') AS provider, coalesce(lb.label, '') AS label,
+       count(DISTINCT l.tx_hash) AS lp_txs,
+       count(DISTINCT l.tx_hash) FILTER (WHERE EXISTS (SELECT 1 FROM trades t WHERE t.chain_id = l.chain_id AND t.tx_hash = l.tx_hash)) AS also_swap,
+       count(DISTINCT l.tx_hash) FILTER (WHERE NOT (l.detail ? 'rv')) AS old_reading,
+       min(l.block_time)::date AS first_seen, max(l.block_time)::date AS last_seen
+  FROM liquidity_events l
+  LEFT JOIN LATERAL (SELECT label FROM labels WHERE address = l.provider AND chain_id IN (0, l.chain_id) ORDER BY chain_id DESC LIMIT 1) lb ON true
+ GROUP BY 1, 2, 3
+ ORDER BY also_swap DESC, lp_txs DESC
+ LIMIT 30;
+
+-- 17. What an older reading still holds (0 everywhere = the whole history has been read by the current code).
+SELECT chain_id, 'transactions with liquidity moves, old reading' AS what, count(DISTINCT tx_hash) AS n
+  FROM liquidity_events WHERE NOT (detail ? 'rv') GROUP BY 1
+UNION ALL
+SELECT chain_id, 'trades, old reading', count(*) FROM trades WHERE NOT (extra ? 'rv') GROUP BY 1
+ORDER BY 1, 2;
+
+-- 18. Trades more than 3x above or below the median price of their chain that day (a wrong reading leaves these behind).
+--     read_by_new_code = true: the current code looked at it again and kept it (a real odd trade); false: not re-read yet
+--     (run "Explorize fix labels" with outliers ticked).
+WITH day AS (
+  SELECT chain_id, date_trunc('day', block_time) AS d, percentile_cont(0.5) WITHIN GROUP (ORDER BY price_usd) AS med
+    FROM trades WHERE price_usd IS NOT NULL GROUP BY 1, 2)
+SELECT t.chain_id, '0x' || encode(t.tx_hash, 'hex') AS tx, t.block_time, t.side, t.rize / 1e18 AS rize, t.usd, t.price_usd,
+       round(day.med::numeric, 6) AS median_of_the_day, (t.extra ? 'rv') AS read_by_new_code
+  FROM trades t JOIN day ON day.chain_id = t.chain_id AND day.d = date_trunc('day', t.block_time)
+ WHERE t.price_usd IS NOT NULL AND day.med > 0 AND (t.price_usd > 3 * day.med OR t.price_usd < day.med / 3)
+ ORDER BY t.block_time DESC
+ LIMIT 100;
