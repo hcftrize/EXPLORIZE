@@ -179,9 +179,10 @@ def test_an_interrupted_run_continues_where_it_stopped(conn):
     rec2["blockNumber"] = hex(BLOCK + 1)
     _seed_transfers(conn, 8453, second, BLOCK + 1, [(RIZE, bb.BEACON, bb.AERO1, 1)])
     with conn.cursor() as cur:
-        cur.execute("""INSERT INTO liquidity_events (chain_id, tx_hash, seq, block_number, block_time, pool_key, kind, provider, rize, counter, detail)
-                       VALUES (8453,%s,1,%s,%s,%s,'remove',%s,-1,'{}','{}')""",
-                    (bytes.fromhex(second[2:]), BLOCK + 1, TS, bytes.fromhex(bb.AERO1[2:]), bytes.fromhex(bb.BEACON[2:])))
+        for seq, kind in ((1, "remove"), (2, "collect")):                       # a Burn and its Collect: counted twice by the old reading
+            cur.execute("""INSERT INTO liquidity_events (chain_id, tx_hash, seq, block_number, block_time, pool_key, kind, provider, rize, counter, detail)
+                           VALUES (8453,%s,%s,%s,%s,%s,%s,%s,-1,'{}','{}')""",
+                        (bytes.fromhex(second[2:]), seq, BLOCK + 1, TS, bytes.fromhex(bb.AERO1[2:]), kind, bytes.fromhex(bb.BEACON[2:])))
     conn.commit()
     node.receipts[second] = rec2
     reg = Registry.from_dir()
@@ -221,3 +222,36 @@ def test_every_row_written_carries_the_reading_marker(conn):
     enrich.process_txs(chain, node, conn, reg, [(tx, BLOCK, TS)])
     trades, liq = _rows(conn)
     assert trades[0][3]["rv"] == enrich.READING and all(d["rv"] == enrich.READING for *_, d in liq)
+
+
+# ------------------------------------------------------------------------------------------ what lp_txs selects, and what it leaves alone
+def _lp_row(cur, tx, seq, kind, rz, extra_detail="{}"):
+    cur.execute("""INSERT INTO liquidity_events (chain_id, tx_hash, seq, block_number, block_time, pool_key, kind, provider, rize, counter, detail)
+                   VALUES (8453,%s,%s,5,%s,%s,%s,%s,%s,'{}',%s)""",
+                (bytes.fromhex(tx[2:]), seq, TS, bytes.fromhex(bb.AERO1[2:]), kind, bytes.fromhex(bb.BEACON[2:]), rz, extra_detail))
+
+
+def test_lp_txs_leaves_alone_what_the_current_reading_cannot_change_and_takes_newest_first(conn):
+    chain = load_chains()["base"]
+    reg = Registry.from_dir()
+    h = lambda c: "0x" + c * 32                                          # noqa: E731
+    with conn.cursor() as cur:
+        _lp_row(cur, h("a1"), 1, "add", 10)                                # a plain add: same under both readings
+        _lp_row(cur, h("a2"), 1, "remove", -10)                            # a remove with no Collect: same
+        _lp_row(cur, h("a3"), 1, "collect", -10)                           # a lone fee collection: selected (cheap, harmless)
+        _lp_row(cur, h("a4"), 1, "remove", -10)                            # Burn then Collect: the Collect was counted on top
+        _lp_row(cur, h("a4"), 2, "collect", -10)
+        _lp_row(cur, h("a5"), 1, "add", 10)                                # an add AND a remove together: a rebalance / a JIT bot
+        _lp_row(cur, h("a5"), 2, "remove", -9)
+        _lp_row(cur, h("a6"), 1, "add", 10)                                # a swap stored next to an add (a zap)
+        cur.execute("INSERT INTO trades (chain_id, tx_hash, block_number, block_time, side, rize, extra)"
+                    " VALUES (8453,%s,7,%s,'buy',1,'{}')", (bytes.fromhex(h("a6")[2:]), TS))
+        _lp_row(cur, h("a7"), 1, "collect", -10, '{"rv": 2}')              # read by the current code already: never again
+        _lp_row(cur, h("a7"), 2, "remove", -10, '{"rv": 2}')
+        for tx, block in ((h("a3"), 3), (h("a4"), 4), (h("a5"), 9), (h("a6"), 7)):
+            cur.execute("UPDATE liquidity_events SET block_number = %s WHERE tx_hash = %s", (block, bytes.fromhex(tx[2:])))
+    conn.commit()
+    sel = reprocess.build_selection("none", None, None, None, None, None, lp_txs=True)
+    rows, per = reprocess.select_txs(conn, chain, reg, sel)
+    assert [x[0] for x in rows] == [h("a5"), h("a6"), h("a4"), h("a3")]    # newest block first; a1, a2 and a7 are not read again
+    assert per == {"lp_txs": 4}
