@@ -17,6 +17,11 @@ the same code as the enrichment (idempotent: running it twice changes nothing mo
               when it is a registered pool or venue address, also every stored transfer that touches it
   --flags     trades carrying one of these flags (for instance price-implausible)
   --tx / --tx-file   an explicit list of transactions (the special cases): a hash, or "chain hash", one per line, # = comment
+  --lp-txs    every transaction that has liquidity moves (any provider, any pool: a liquidity manager like the Proxy Beacon,
+              a plain add / remove) and was stored by an older reading (no "rv" marker). A rewritten transaction carries the
+              marker and leaves the selection: an interrupted run is simply started again and continues where it stopped.
+  --outliers  trades stored by an older reading whose price is more than 3 times above or below the median price of their
+              chain that day: the ones a wrong reading leaves behind when no liquidity move was recorded next to them
 
 Nothing is written with --dry-run: it only says what would be re-read. The write of each batch takes the lock of the unified
 run, so a correction never writes the same rows as a unified run at the same moment.
@@ -44,7 +49,9 @@ SNAP_CHUNK = 5000
 class Selection:
     """What to re-read: the union of the selectors (all empty = nothing)."""
 
-    def __init__(self, reasons=(), pools=(), addresses=(), flags=(), txs=()):
+    def __init__(self, reasons=(), pools=(), addresses=(), flags=(), txs=(), lp_txs=False, outliers=False):
+        self.lp_txs = bool(lp_txs)
+        self.outliers = bool(outliers)
         self.reasons = tuple(reasons)
         self.pools = tuple(pools)
         self.addresses = tuple(addresses)
@@ -52,7 +59,7 @@ class Selection:
         self.txs = tuple(txs)                          # (chain slug or None, 0x hash)
 
     def empty(self) -> bool:
-        return not (self.reasons or self.pools or self.addresses or self.flags or self.txs)
+        return not (self.reasons or self.pools or self.addresses or self.flags or self.txs or self.lp_txs or self.outliers)
 
 
 def _split(text: str | None) -> list[str]:
@@ -76,7 +83,7 @@ def parse_tx_text(text: str) -> list[tuple[str | None, str]]:
 
 
 def build_selection(reasons: str | None, pools: str | None, addresses: str | None, flags: str | None,
-                    txs: str | None, tx_file: str | None) -> Selection:
+                    txs: str | None, tx_file: str | None, *, lp_txs: bool = False, outliers: bool = False) -> Selection:
     pool_l, addr_l, flag_l = _split(pools), _split(addresses), _split(flags)
     for p in pool_l:
         if not HEX_RE.match(p) or not (len(p) == 42 or 18 <= len(p) <= 66):
@@ -93,12 +100,12 @@ def build_selection(reasons: str | None, pools: str | None, addresses: str | Non
     r = _split(reasons)
     if r == ["none"]:
         r = []
-    elif not r and reasons is None and not (pool_l or addr_l or flag_l or tx_l):
+    elif not r and reasons is None and not (pool_l or addr_l or flag_l or tx_l or lp_txs or outliers):
         r = list(DEFAULT_REASONS)                      # no selector at all: the review queue
     bad = [x for x in r if x not in REASONS]
     if bad:
         raise SystemExit(f"--reasons {','.join(bad)}: choose among {', '.join(REASONS)} (or none)")
-    return Selection(r, pool_l, addr_l, flag_l, tx_l)
+    return Selection(r, pool_l, addr_l, flag_l, tx_l, lp_txs, outliers)
 
 
 def _bin(h: str):
@@ -160,6 +167,20 @@ def select_txs(conn, chain, reg: Registry, sel: Selection, log=print) -> tuple[l
                                 WHERE chain_id = %s AND (from_addr = %s OR to_addr = %s) GROUP BY tx_hash""",
                             (cid, _bin(a), _bin(a)))
                 add("address", _rows(cur))
+        if sel.lp_txs:
+            cur.execute("""SELECT DISTINCT encode(tx_hash,'hex'), block_number, block_time FROM liquidity_events
+                            WHERE chain_id = %s AND NOT (detail ? 'rv')""", (cid,))
+            add("lp_txs", _rows(cur))
+        if sel.outliers:
+            cur.execute("""WITH day AS (
+                              SELECT date_trunc('day', block_time) AS d,
+                                     percentile_cont(0.5) WITHIN GROUP (ORDER BY price_usd) AS med
+                                FROM trades WHERE chain_id = %s AND price_usd IS NOT NULL GROUP BY 1)
+                           SELECT encode(t.tx_hash,'hex'), t.block_number, t.block_time
+                             FROM trades t JOIN day ON day.d = date_trunc('day', t.block_time)
+                            WHERE t.chain_id = %s AND t.price_usd IS NOT NULL AND NOT (t.extra ? 'rv')
+                              AND day.med > 0 AND (t.price_usd > 3 * day.med OR t.price_usd < day.med / 3)""", (cid, cid))
+            add("outliers", _rows(cur))
         if sel.flags:
             cur.execute("""SELECT encode(tx_hash,'hex'), block_number, block_time FROM trades
                             WHERE chain_id = %s AND flags && %s::text[]""", (cid, list(sel.flags)))
